@@ -2,44 +2,34 @@ import re
 import time
 import io
 import threading
-import queue
 import subprocess
 import traceback
 import logging
 import json
 from random import randint
-import wave
 import os
 import sys
 from flask import Flask, Response, render_template, jsonify
-from flask_restful import Resource, Api, reqparse, abort
+from flask_restful import Api
 from flask_cors import CORS
-import atexit
-from datetime import datetime
 from threading import Condition
 # import picamera2
 import numpy as np
-import requests
 import pyaudio
 from pydub import AudioSegment
 from picamera2 import Picamera2, MappedArray
-from picamera2.encoders import JpegEncoder, H264Encoder
-from picamera2.outputs import FileOutput, FfmpegOutput
+from picamera2.encoders import JpegEncoder
+from picamera2.outputs import FileOutput
 from picamera2.devices import Hailo, IMX500
 from picamera2.devices.imx500 import NetworkIntrinsics, postprocess_nanodet_detection
+from picamera2.devices.imx500.postprocess import scale_boxes
 from functools import lru_cache
-# from piper.voice import PiperVoice
-import sounddevice as sd
-import pyrubberband as pyrb
 import cv2
 from motor_control import motors
-from retry import retry
 from servo_control import servos
 # from light_bar import light_bar
 
 
-# COQUI_URL = "http://[::1]:5002"
-# COQUI_ENDPOINT = "/api/tts?text="
 TILT_ANGLE = None
 PAN_ANGLE = None
 AUDIO_FORMAT = pyaudio.paInt16
@@ -210,54 +200,6 @@ class StreamingOutput(io.BufferedIOBase):
             return self.frame
 
 
-class IMX500Detection:
-    def __init__(self, coords, category, conf, metadata):
-        """
-        Create a Detection object, recording the bounding box, category and confidence.
-        """
-        self.category = category
-        self.conf = conf
-        self.box = imx500.convert_inference_coords(coords, metadata, picam2)
-
-
-
-def parse_detections_imx500(metadata: dict):
-    """Parse the output tensor into a number of detected objects, scaled to the ISP output."""
-    global DETECTIONS
-    bbox_normalization = intrinsics.bbox_normalization
-    bbox_order = intrinsics.bbox_order
-    threshold = SCORE_THRESH
-    iou = args.iou
-    max_detections = args.max_detections
-
-    np_outputs = imx500.get_outputs(metadata, add_batch=True)
-    input_w, input_h = imx500.get_input_size()
-    if np_outputs is None:
-        return last_detections
-    if intrinsics.postprocess == "nanodet":
-        boxes, scores, classes = \
-            postprocess_nanodet_detection(outputs=np_outputs[0], conf=threshold, iou_thres=iou,
-                                          max_out_dets=max_detections)[0]
-        from picamera2.devices.imx500.postprocess import scale_boxes
-        boxes = scale_boxes(boxes, 1, 1, input_h, input_w, False, False)
-    else:
-        boxes, scores, classes = np_outputs[0][0], np_outputs[1][0], np_outputs[2][0]
-        if bbox_normalization:
-            boxes = boxes / input_h
-
-        if bbox_order == "xy":
-            boxes = boxes[:, [1, 0, 3, 2]]
-        boxes = np.array_split(boxes, 4, axis=1)
-        boxes = zip(*boxes)
-
-    last_detections = [
-        IMX500Detection(box, category, score, metadata)
-        for box, score, category in zip(boxes, scores, classes)
-        if score > threshold
-    ]
-    return last_detections
-
-
 @lru_cache
 def imx500_get_labels():
     labels = intrinsics.labels
@@ -294,7 +236,7 @@ def draw_detections_imx500(request, stream="main"):
             label = f"{labels[int(detection.category)]} ({detection.conf:.2f})"
 
             # Calculate text size and position
-            (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)  # pylint: disable=no-member
             text_x = x + 5
             text_y = y + 15
 
@@ -302,27 +244,27 @@ def draw_detections_imx500(request, stream="main"):
             overlay = m.array.copy()
 
             # Draw the background rectangle on the overlay
-            cv2.rectangle(overlay,
+            cv2.rectangle(overlay,  # pylint: disable=no-member
                           (text_x, text_y - text_height),
                           (text_x + text_width, text_y + baseline),
                           (255, 255, 255),  # Background color (white)
-                          cv2.FILLED)
+                          cv2.FILLED)  # pylint: disable=no-member
 
             alpha = 0.30
-            cv2.addWeighted(overlay, alpha, m.array, 1 - alpha, 0, m.array)
+            cv2.addWeighted(overlay, alpha, m.array, 1 - alpha, 0, m.array) # pylint: disable=no-member
 
             # Draw text on top of the background
-            cv2.putText(m.array, label, (text_x, text_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            cv2.putText(m.array, label, (text_x, text_y),  # pylint: disable=no-member
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)  # pylint: disable=no-member
 
             # Draw detection box
-            cv2.rectangle(m.array, (x, y), (x + w, y + h), (0, 255, 0, 0), thickness=2)
+            cv2.rectangle(m.array, (x, y), (x + w, y + h), (0, 255, 0, 0), thickness=2) # pylint: disable=no-member
 
         if intrinsics.preserve_aspect_ratio:
             b_x, b_y, b_w, b_h = imx500.get_roi_scaled(request)
             color = (255, 0, 0)  # red
-            cv2.putText(m.array, "ROI", (b_x + 5, b_y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-            cv2.rectangle(m.array, (b_x, b_y), (b_x + b_w, b_y + b_h), (255, 0, 0, 0))
+            cv2.putText(m.array, "ROI", (b_x + 5, b_y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)  # pylint: disable=no-member
+            cv2.rectangle(m.array, (b_x, b_y), (b_x + b_w, b_y + b_h), (255, 0, 0, 0))  # pylint: disable=no-member
 
 
 def draw_objects_hailo(request):
@@ -342,9 +284,107 @@ def draw_objects_hailo(request):
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0, 0), 1, cv2.LINE_AA)  # pylint: disable=no-member
 
 
+def run_detection_camera_0_imx500():
+    """
+    Run object detection on the front camera feed using the IMX500 board
+    Update the global DETECTIONS variable with the detected objects and their bounding boxes
+    """
+    logger = logging.getLogger(__name__)
+    output_main = StreamingOutput()
+
+    if not intrinsics:
+        intrinsics.task = "object detection"
+    elif intrinsics.task != "object detection":
+        raise ValueError("Network is not an object detection task")
+
+    if intrinsics.labels is None:
+        with open("assets/coco_labels.txt", "r", encoding="utf-8") as fi:
+            intrinsics.labels = fi.read().splitlines()
+    intrinsics.update_with_defaults()
+
+    def camera_thread():
+        try:
+            with Picamera2(imx500.camera_num) as picam2:
+
+                class IMX500Detection:
+                    """
+                    A detected object.
+                    """
+                    def __init__(self, coords, category, conf, metadata):
+                        """
+                        Create a Detection object, recording the bounding box, category and confidence.
+                        """
+                        self.category = category
+                        self.conf = conf
+                        self.box = imx500.convert_inference_coords(coords, metadata, picam2)
+                
+                def parse_detections_imx500(metadata: dict):
+                    """Parse the output tensor into a number of detected objects, scaled to the ISP output."""
+                    bbox_normalization = intrinsics.bbox_normalization
+                    bbox_order = intrinsics.bbox_order
+                    threshold = SCORE_THRESH
+                    iou = IMX500_IOU
+                    max_detections = IMX500_MAX_DETECTIONS
+                    np_outputs = imx500.get_outputs(metadata, add_batch=True)
+                    input_w, input_h = imx500.get_input_size()
+                    if np_outputs is None:
+                        return []
+                    if intrinsics.postprocess == "nanodet":
+                        boxes, scores, classes = \
+                            postprocess_nanodet_detection(outputs=np_outputs[0], conf=threshold, iou_thres=iou,
+                                                        max_out_dets=max_detections)[0]
+                        boxes = scale_boxes(boxes, 1, 1, input_h, input_w, False, False)
+                    else:
+                        boxes, scores, classes = np_outputs[0][0], np_outputs[1][0], np_outputs[2][0]
+                        if bbox_normalization:
+                            boxes = boxes / input_h
+
+                        if bbox_order == "xy":
+                            boxes = boxes[:, [1, 0, 3, 2]]
+                        boxes = np.array_split(boxes, 4, axis=1)
+                        boxes = zip(*boxes)
+
+                    last_detections = [
+                        IMX500Detection(box, category, score, metadata)
+                        for box, score, category in zip(boxes, scores, classes)
+                        if score > threshold
+                    ]
+                    return last_detections
+
+                main = {"size": (640, 480), "format": "XRGB8888"}
+                lores = {"size": (intrinsics.input_width, intrinsics.input_height), "format": "RGB888"}
+                controls = {"FrameRate": intrinsics.inference_rate}
+                config_imx500 = picam2.create_preview_configuration(main,
+                                                                    lores=lores,
+                                                                    controls=controls, buffer_count=12)
+                imx500.show_network_fw_progress_bar()
+                picam2.configure(config_imx500)
+                picam2.start_recording(encoder=JpegEncoder(), output=FileOutput(output_main))
+
+                if intrinsics.preserve_aspect_ratio:
+                    imx500.set_auto_aspect_ratio()
+
+                last_results = None
+                picam2.pre_callback = draw_detections_imx500
+                while True:
+                    last_results = parse_detections_imx500(picam2.capture_metadata())
+                    global DETECTIONS  # pylint: disable=global-statement
+                    DETECTIONS = {
+                        "front_camera": last_results,
+                        "rear_camera": DETECTIONS['rear_camera']
+                    }
+                    logger.info('DETECTIONS: %s', DETECTIONS)
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error('Error: %s', e)
+
+    threading.Thread(target=camera_thread, daemon=True).start()
+
+    return output_main
+
+
 def run_detection_camera_0_hailo(model, labels, score_thresh):
     """
-    Run object detection on the front camera feed
+    Run object detection on the front camera feed using the Hailo board
     """
     logger = logging.getLogger(__name__)
     output_main = StreamingOutput()
@@ -442,6 +482,8 @@ def cam0():
             DETECT_LABELS,
             SCORE_THRESH
             )
+    elif FRONT_CAMERA_OUTPUT is None:
+        FRONT_CAMERA_OUTPUT = run_detection_camera_0_imx500()
 
     def frame_generator():
         """
@@ -518,10 +560,6 @@ def cam1():
 #     play_audio(audio)
 #     return "Text to Speech Complete"
 
-"""
-api.add_resource(video_feed_0, '/cam0')
-api.add_resource(video_feed_1, '/cam1')
-"""
 
 @app.route('/api/motor/<string:direction>', methods=['GET', 'POST'])
 def motor_control(direction):
@@ -570,10 +608,12 @@ def motor_control(direction):
 
 @app.route('/api/pan/<string:direction>', methods=['GET', 'POST'])
 def pan(direction):
-    global PAN_ANGLE
-    global TILT_ANGLE
-    max_left = None
-    max_right = None
+    """
+    Pan the camera in the specified direction
+    """
+    global PAN_ANGLE  # pylint: disable=global-statement
+    global TILT_ANGLE  # pylint: disable=global-statement
+
     if direction == 'left':
         servo_angle = servos.pan('left')
         print(f"Panned left to {servo_angle}")
@@ -595,9 +635,11 @@ def pan(direction):
 
 @app.route('/api/tilt/<string:direction>', methods=['GET', 'POST'])
 def tilt(direction):
-    global TILT_ANGLE
-    max_up = None
-    max_down = None
+    """
+    Tilt the camera in the specified direction
+    """
+    global TILT_ANGLE  # pylint: disable=global-statement
+
     if direction == 'up':
         servo_angle = servos.tilt('up')
         print(f"Tilted up to {servo_angle}")
@@ -612,13 +654,21 @@ def tilt(direction):
 
 @app.route('/api/tts/<string:text>', methods=['GET', 'POST'])
 def tts(text):
+    """
+    Convert text to speech using Piper TTS
+    """
     result = piper_tts(text)
     return jsonify({'message': result}), 200  # Return JSON response with HTTP 200 status
 
 
 def stream_audio():
-    # start Recording
+    """
+    Stream audio from the default audio input device
+    """
     def sound():
+        """
+        Generate audio data from the default audio input device
+        """
         sampleRate = AUDIO_RATE
         bitsPerSample = 16
         channels = 2
@@ -644,6 +694,9 @@ def stream_audio():
 
 
 def genHeader(sampleRate, bitsPerSample, channels):
+    """
+    Generate the WAV header
+    """
     datasize = 2000*10**6  # Some large number to indicate streaming
     o = bytes("RIFF", 'ascii')                                   # (4byte) Marks file as RIFF
     o += (datasize + 36).to_bytes(4, 'little')                   # (4byte) File size in bytes excluding this and RIFF marker
@@ -681,7 +734,7 @@ def convert_sound_file(sound_file):
     audio = audio.set_channels(1)
     audio = audio.set_sample_width(2)
     audio.export(MEME_SOUNDS_FOLDER_CONVERTED + sound_file, format='wav')
-    logger.info(f'Converted {sound_file}')
+    logger.info('Converted %s', sound_file)
     return out_file
 
 
@@ -691,7 +744,7 @@ def convert_all_sound_files():
     """
     logger = logging.getLogger(__name__)
     for sound in MEME_SOUNDS:
-        logger.info(f'Converting {sound}')
+        logger.info('Converting %s', sound)
         convert_sound_file(sound)
     
 
@@ -699,7 +752,7 @@ def convert_all_sound_files():
 def meme_sound(sound_id):
     if sound_id < 0 or sound_id >= len(MEME_SOUNDS):
         return jsonify({'message': 'Invalid sound_id'}), 400
-    
+
     sound = MEME_SOUNDS[sound_id]
     stream = audio1.open(format=pyaudio.paInt16,
                          output_device_index=AUDIO_DEVICE_INDEX,
@@ -707,7 +760,7 @@ def meme_sound(sound_id):
                          rate=AUDIO_RATE,
                          frames_per_buffer=AUDIO_CHUNK,
                          output=True)
-    
+
     # Read and process the audio file
     audio = open(MEME_SOUNDS_FOLDER_CONVERTED + sound, 'rb').read()
     audio = AudioSegment.from_mp3(io.BytesIO(audio))
@@ -715,14 +768,14 @@ def meme_sound(sound_id):
     audio = audio.set_channels(1)
     audio = audio.set_sample_width(2)
     audio = audio.normalize()
-    
+
     # Convert AudioSegment to raw audio data
     raw_data = audio.raw_data
-    
+
     # Write raw audio data to the stream in chunks
     for i in range(0, len(raw_data), AUDIO_CHUNK):
         stream.write(raw_data[i:i + AUDIO_CHUNK])
-    
+
     stream.stop_stream()
     stream.close()
     return jsonify({'message': 'Meme Sound Played'}), 200

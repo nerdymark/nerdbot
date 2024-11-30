@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Feeds</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <h1>Video Feeds</h1>
+    <div class="video-container">
+        <div class="video-feed">
+            <h2>Camera 0</h2>
+            <img src="{{ url_for('video_feed_0') }}" alt="Camera 0 Feed">
+        </div>
+        <div class="video-feed">
+            <h2>Camera 1</h2>
+            <img src="{{ url_for('video_feed_1') }}" alt="Camera 1 Feed">
+        </div>
+    </div>
+</body>
+</html>

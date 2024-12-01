@@ -14,6 +14,7 @@ from flask_restful import Api
 from flask_cors import CORS
 from threading import Condition
 # import picamera2
+import libcamera
 import numpy as np
 import pyaudio
 from pydub import AudioSegment
@@ -53,7 +54,7 @@ with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
 LOG_FILE = config.get('log_file')
 logging.basicConfig(level=logging.INFO, filename=LOG_FILE)
 logging.info("Logging to file %s", LOG_FILE)
-logging.getLogger('flask_cors').level = logging.DEBUG
+logging.getLogger('flask_cors').level = logging.WARN
 
 app = Flask(__name__)
 app.config['CORS_HEADERS'] = 'Content-Type'
@@ -294,18 +295,21 @@ def run_detection_camera_0_imx500():
 
     if not intrinsics:
         intrinsics.task = "object detection"
+        logger.info("Configuring IMX500 for object detection")
     elif intrinsics.task != "object detection":
+        logger.error("Network is not an object detection task")
         raise ValueError("Network is not an object detection task")
 
     if intrinsics.labels is None:
+        logger.info("Loading COCO labels")
         with open("assets/coco_labels.txt", "r", encoding="utf-8") as fi:
             intrinsics.labels = fi.read().splitlines()
+        logger.info("Labels: %s", intrinsics.labels)
     intrinsics.update_with_defaults()
 
     def camera_thread():
         try:
             with Picamera2(imx500.camera_num) as picam2:
-
                 class IMX500Detection:
                     """
                     A detected object.
@@ -352,7 +356,7 @@ def run_detection_camera_0_imx500():
                     return last_detections
 
                 main = {"size": (640, 480), "format": "XRGB8888"}
-                lores = {"size": (intrinsics.input_width, intrinsics.input_height), "format": "RGB888"}
+                lores = {"size": (640, 480), "format": "RGB888"}
                 controls = {"FrameRate": intrinsics.inference_rate}
                 config_imx500 = picam2.create_preview_configuration(main,
                                                                     lores=lores,
@@ -373,7 +377,11 @@ def run_detection_camera_0_imx500():
                         "front_camera": last_results,
                         "rear_camera": DETECTIONS['rear_camera']
                     }
-                    logger.info('DETECTIONS: %s', DETECTIONS)
+                    # for detection in last_results:
+                    #     # What are the detections and their bounding boxes?
+                    #     logger.info("Bounding Box: %s", detection.box)
+                    #     logger.info("Category: %s", detection.category)
+                    #     logger.info("Confidence: %s", detection.conf)
         except Exception as e:  # pylint: disable=broad-except
             logger.error('Error: %s', e)
 
@@ -446,28 +454,62 @@ def start_camera_1():
     """
     Use camera 1 to stream video to StreamOutput
     """
-    with Picamera2(camera_num=1) as picam2:
-        main = {'size': (640, 480), 'format': 'XRGB8888'}
-        lores = {'size': (640, 480), 'format': 'RGB888'}
-        controls = {'FrameRate': 30}
-        picamera_config = picam2.create_preview_configuration(main, lores=lores, controls=controls)
-        picam2.configure(picamera_config)
+    logger = logging.getLogger(__name__)
+    output_rear = StreamingOutput()
+    running = threading.Event()
+    running.set()
 
-        output = StreamingOutput()
-        picam2.start_recording(JpegEncoder(), FileOutput(output))
+    def camera_thread():
+        recording = False
+        try:
+            with Picamera2(camera_num=1) as picam2:
+                main = {'size': (640, 480), 'format': 'XRGB8888'}
+                controls = {'FrameRate': 30}
+                transform = libcamera.Transform(hflip=True, vflip=True)
+                picamera_config = picam2.create_preview_configuration(main,
+                                                                      controls=controls,
+                                                                      transform=transform)
+                picam2.configure(picamera_config)
+                
+                picam2.start_recording(encoder=JpegEncoder(), output=FileOutput(output_rear))
+                recording = True
+                
+                # Keep thread alive while recording
+                while running.is_set():
+                    try:
+                        time.sleep(1)
+                    except Exception as e:
+                        logger.error('Recording error: %s', e)
+                        break
+                
+                # Cleanup
+                if recording:
+                    picam2.stop_recording()
+                    recording = False
+                
+        except Exception as e:
+            logger.error('Camera thread error: %s', e)
+            if recording:
+                try:
+                    picam2.stop_recording()
+                except:
+                    pass
+        finally:
+            running.clear()
 
-        while True:
-            frame = output.read_frame()
-            if frame is None:
-                continue
+    thread = threading.Thread(target=camera_thread, daemon=True)
+    thread.start()
+    
+    # Store thread reference for cleanup
+    output_rear.thread = thread
+    output_rear.running = running
 
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+    return output_rear
 
 
 # Start the rear camera stream
 FRONT_CAMERA_OUTPUT = None
-REAR_CAMERA_OUTPUT = start_camera_1()
+REAR_CAMERA_OUTPUT = None
 
 
 @app.route('/cam0')
@@ -475,14 +517,17 @@ def cam0():
     """
     Stream the front camera feed
     """
+    logger = logging.getLogger(__name__)
     global FRONT_CAMERA_OUTPUT  # pylint: disable=global-statement
     if FRONT_CAMERA_OUTPUT is None and DETECTIONS_USE_HAILO:
+        logger.info('Using Hailo for object detection')
         FRONT_CAMERA_OUTPUT = run_detection_camera_0_hailo(
             HAILO_DETECT_MODEL,
             DETECT_LABELS,
             SCORE_THRESH
             )
     elif FRONT_CAMERA_OUTPUT is None:
+        logger.info('Using IMX500 for object detection')
         FRONT_CAMERA_OUTPUT = run_detection_camera_0_imx500()
 
     def frame_generator():
@@ -504,8 +549,24 @@ def cam1():
     """
     Stream the rear camera feed
     """
-    return Response(REAR_CAMERA_OUTPUT,
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    logger = logging.getLogger(__name__)
+    global REAR_CAMERA_OUTPUT  # pylint: disable=global-statement
+    if REAR_CAMERA_OUTPUT is None:
+        logger.info('Starting rear camera stream')
+        REAR_CAMERA_OUTPUT = start_camera_1()
+
+    def frame_generator():
+        """
+        Generate frames from the rear camera feed
+        """
+        while True:
+            frame = REAR_CAMERA_OUTPUT.read_frame()
+            if frame is None:
+                continue
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+
+    return Response(frame_generator(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
 # @retry(delay=2, backoff=3, max_delay=10)

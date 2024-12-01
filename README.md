@@ -23,3 +23,4 @@ i am a small household pet
 * [400Pcs Threaded Inserts, M2 M2.5 M3 M4 M5 M6 Female Thread Metric Knurled Nuts Assortment Kit, Brass Heat Set Insert for Plastic and 3D Printing Components](https://amzn.to/3OxuE2j)
 * [Heat Set Insert Tips for Sizes M2, M2.5, M3, M4, and M5 - Soldering Iron Tips for 3D Printer Users, 3D Printing Accessories Compatible with Hakko FX-888D and Weller SP40NKUS Soldering Irons](https://amzn.to/3Ox9zVI)
 * [8 Bits WS2812 RGB LED Stick 8 X WS2812B 5050 Full Color RGB LED Module Built-in Drivers for Arduino Raspberry Pi ESP32 Shopping Mall Home Decoration Lighting Pack of 5pcs](https://amzn.to/3OzRDdh)
+* [Adafruit 3538 AMG8833 IR Thermal Camera Breakout](https://amzn.to/3ZsZNu9)

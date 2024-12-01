@@ -17,3 +17,8 @@ i am a small household pet
 * [2327 - Raspberry Pi PWM Servo Hat Development Board](https://amzn.to/4g92tCG)
 * Tilt servo [35kg high Torque Coreless Motor servo Metal Gear Digital and Stainless Steel Gear servo arduino servo for Robotic DIY,RC car (Control Angle 270°)](https://amzn.to/3Bavcbr)
 * Pan servo [[4-Pack] MG996R 55g Metal Gear Torque Digital Servo Motor for Futaba JR RC Helicopter Car Boat Robot](https://amzn.to/41eqBzE)
+* [Adafruit MONSTER M4SK - DIY Electronic Eyes Mask](https://www.adafruit.com/product/4343)
+* [20 Sets Jst 2.0 Ph 4 Pin Connector Plug, Include 10 Sets Mini 4 Pin Jst Ph2.0 Connector Plug Female with 150mm Cable Wire & 10 Piece Male Micro Jst Ph2.0mm 4Pin Connector Plug](https://amzn.to/4fTkOE2)
+* [Laser Module 405nm Violet Purple Blue Laser "Dot" Diode (Adjust Focus 5mw DC3V-5V)](https://amzn.to/4fUfUGY)
+* [400Pcs Threaded Inserts, M2 M2.5 M3 M4 M5 M6 Female Thread Metric Knurled Nuts Assortment Kit, Brass Heat Set Insert for Plastic and 3D Printing Components](https://amzn.to/3OxuE2j)
+* [Heat Set Insert Tips for Sizes M2, M2.5, M3, M4, and M5 - Soldering Iron Tips for 3D Printer Users, 3D Printing Accessories Compatible with Hakko FX-888D and Weller SP40NKUS Soldering Irons](https://amzn.to/3Ox9zVI)

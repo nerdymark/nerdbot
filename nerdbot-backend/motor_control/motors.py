@@ -11,25 +11,46 @@ The angles of the wheels look like this:
 /  \  L3, R3  45 degrees and -45 degrees
 
 The motors are controlled by two Adafruit Motor HATs.
+
+Image explaining the principles of mecanum wheels:
+https://cdn11.bigcommerce.com/s-f6vfspkkjf/images/stencil/original/products/4941/22500/3209-0001-0007-Product-Insight-2__06708__92045.1725900602.png?c=1
+
+
 """
+import time
 import math
 from adafruit_motorkit import MotorKit
 
 
-RIGHT_KIT = MotorKit(address=0x60)
-LEFT_KIT = MotorKit(address=0x61)
+RIGHT_KIT = MotorKit(address=0x61)
+LEFT_KIT = MotorKit(address=0x60)
+
+# Table to accomodate for possible manufacturing differences in wiring polarity
+
+POLARITY_TABLE = {
+    'right_kit': {
+        1: 1,
+        2: 1,
+        3: 1
+    },
+    'left_kit': {
+        1: -1,
+        2: -1,
+        3: -1
+    }
+}
 
 def move_forward(speed):
     """
     Move the robot forward
     """
-    RIGHT_KIT.motor1.throttle = -speed
-    RIGHT_KIT.motor2.throttle = -speed
-    RIGHT_KIT.motor3.throttle = -speed
+    RIGHT_KIT.motor1.throttle = POLARITY_TABLE['right_kit'][1] * speed
+    RIGHT_KIT.motor2.throttle = POLARITY_TABLE['right_kit'][2] * speed
+    RIGHT_KIT.motor3.throttle = POLARITY_TABLE['right_kit'][3] * speed
 
-    LEFT_KIT.motor1.throttle = speed
-    LEFT_KIT.motor2.throttle = speed
-    LEFT_KIT.motor3.throttle = speed
+    LEFT_KIT.motor1.throttle = POLARITY_TABLE['left_kit'][1] * speed
+    LEFT_KIT.motor2.throttle = POLARITY_TABLE['left_kit'][2] * speed
+    LEFT_KIT.motor3.throttle = POLARITY_TABLE['left_kit'][3] * speed
 
     return "Moving forward"
 
@@ -38,13 +59,13 @@ def move_backward(speed):
     """
     Move the robot backward
     """
-    RIGHT_KIT.motor1.throttle = speed
-    RIGHT_KIT.motor2.throttle = speed
-    RIGHT_KIT.motor3.throttle = speed
+    RIGHT_KIT.motor1.throttle = POLARITY_TABLE['right_kit'][1] * -speed
+    RIGHT_KIT.motor2.throttle = POLARITY_TABLE['right_kit'][2] * -speed
+    RIGHT_KIT.motor3.throttle = POLARITY_TABLE['right_kit'][3] * -speed
 
-    LEFT_KIT.motor1.throttle = -speed
-    LEFT_KIT.motor2.throttle = -speed
-    LEFT_KIT.motor3.throttle = -speed
+    LEFT_KIT.motor1.throttle = POLARITY_TABLE['left_kit'][1] * -speed
+    LEFT_KIT.motor2.throttle = POLARITY_TABLE['left_kit'][2] * -speed
+    LEFT_KIT.motor3.throttle = POLARITY_TABLE['left_kit'][3] * -speed
 
     return "Moving backward"
 
@@ -53,13 +74,13 @@ def turn_left(speed):
     """
     Turn the robot left
     """
-    RIGHT_KIT.motor1.throttle = speed
-    RIGHT_KIT.motor2.throttle = speed
-    RIGHT_KIT.motor3.throttle = speed
+    RIGHT_KIT.motor1.throttle = POLARITY_TABLE['right_kit'][1] * -speed
+    RIGHT_KIT.motor2.throttle = POLARITY_TABLE['right_kit'][2] * -speed
+    RIGHT_KIT.motor3.throttle = POLARITY_TABLE['right_kit'][3] * -speed
 
-    LEFT_KIT.motor1.throttle = speed
-    LEFT_KIT.motor2.throttle = speed
-    LEFT_KIT.motor3.throttle = speed
+    LEFT_KIT.motor1.throttle = POLARITY_TABLE['left_kit'][1] * speed
+    LEFT_KIT.motor2.throttle = POLARITY_TABLE['left_kit'][2] * speed
+    LEFT_KIT.motor3.throttle = POLARITY_TABLE['left_kit'][3] * speed
 
     return "Turning left"
 
@@ -68,13 +89,13 @@ def turn_right(speed):
     """
     Turn the robot right
     """
-    RIGHT_KIT.motor1.throttle = -speed
-    RIGHT_KIT.motor2.throttle = -speed
-    RIGHT_KIT.motor3.throttle = -speed
+    RIGHT_KIT.motor1.throttle = POLARITY_TABLE['right_kit'][1] * speed
+    RIGHT_KIT.motor2.throttle = POLARITY_TABLE['right_kit'][2] * speed
+    RIGHT_KIT.motor3.throttle = POLARITY_TABLE['right_kit'][3] * speed
 
-    LEFT_KIT.motor1.throttle = -speed
-    LEFT_KIT.motor2.throttle = -speed
-    LEFT_KIT.motor3.throttle = -speed
+    LEFT_KIT.motor1.throttle = POLARITY_TABLE['left_kit'][1] * -speed
+    LEFT_KIT.motor2.throttle = POLARITY_TABLE['left_kit'][2] * -speed
+    LEFT_KIT.motor3.throttle = POLARITY_TABLE['left_kit'][3] * -speed
 
     return "Turning right"
 
@@ -83,14 +104,15 @@ def move_left(speed):
     """
     Move the robot left
     Motor2 on RIGHT_KIT and LEFT_LIT are equipped with omni wheels, so they don't need to move
+    TODO: This doesn't work yet
     """
-    RIGHT_KIT.motor1.throttle = -speed
+    RIGHT_KIT.motor1.throttle = POLARITY_TABLE['right_kit'][1] * -speed
     RIGHT_KIT.motor2.throttle = 0
-    RIGHT_KIT.motor3.throttle = speed
+    RIGHT_KIT.motor3.throttle = POLARITY_TABLE['right_kit'][3] * speed
 
-    LEFT_KIT.motor1.throttle = speed
+    LEFT_KIT.motor1.throttle = POLARITY_TABLE['left_kit'][1] * speed
     LEFT_KIT.motor2.throttle = 0
-    LEFT_KIT.motor3.throttle = -speed
+    LEFT_KIT.motor3.throttle = POLARITY_TABLE['left_kit'][3] * -speed
 
     return "Moving left"
 
@@ -99,14 +121,15 @@ def move_right(speed):
     """
     Move the robot right
     Motor2 needs the extra speed to move the robot in the desired direction
+    TODO: This doesn't work yet
     """
-    RIGHT_KIT.motor1.throttle = speed
+    RIGHT_KIT.motor1.throttle = POLARITY_TABLE['right_kit'][1] * speed
     RIGHT_KIT.motor2.throttle = 0
-    RIGHT_KIT.motor3.throttle = -speed
+    RIGHT_KIT.motor3.throttle = POLARITY_TABLE['right_kit'][3] * -speed
 
-    LEFT_KIT.motor1.throttle = -speed
+    LEFT_KIT.motor1.throttle = POLARITY_TABLE['left_kit'][1] * -speed
     LEFT_KIT.motor2.throttle = 0
-    LEFT_KIT.motor3.throttle = speed
+    LEFT_KIT.motor3.throttle = POLARITY_TABLE['left_kit'][3] * speed
 
 
 
@@ -152,3 +175,43 @@ def stop():
     LEFT_KIT.motor3.throttle = None
 
 
+def test_motors():
+    """
+    Test each motor, one at a time, for 1 second. They should rotate clockwise then counter clockwise
+    """
+    RIGHT_KIT.motor1.throttle = POLARITY_TABLE['right_kit'][1] * 1
+    time.sleep(1)
+    RIGHT_KIT.motor1.throttle = None
+    RIGHT_KIT.motor1.throttle = POLARITY_TABLE['right_kit'][1] * -1
+    RIGHT_KIT.motor1.throttle = None
+    time.sleep(1)
+
+    RIGHT_KIT.motor2.throttle = POLARITY_TABLE['right_kit'][2] * 1
+    time.sleep(1)
+    RIGHT_KIT.motor2.throttle = POLARITY_TABLE['right_kit'][2] * -1
+    time.sleep(1)
+    RIGHT_KIT.motor2.throttle = None
+
+    RIGHT_KIT.motor3.throttle = POLARITY_TABLE['right_kit'][3] * 1
+    time.sleep(1)
+    RIGHT_KIT.motor3.throttle = POLARITY_TABLE['right_kit'][3] * -1
+    time.sleep(1)
+    RIGHT_KIT.motor3.throttle = None
+
+    LEFT_KIT.motor1.throttle = POLARITY_TABLE['left_kit'][1] * 1
+    time.sleep(1)
+    LEFT_KIT.motor1.throttle = POLARITY_TABLE['left_kit'][1] * -1
+    time.sleep(1)
+    LEFT_KIT.motor1.throttle = None
+
+    LEFT_KIT.motor2.throttle = POLARITY_TABLE['left_kit'][2] * 1
+    time.sleep(1)
+    LEFT_KIT.motor2.throttle = POLARITY_TABLE['left_kit'][2] * -1
+    time.sleep(1)
+    LEFT_KIT.motor2.throttle = None
+
+    LEFT_KIT.motor3.throttle = POLARITY_TABLE['left_kit'][3] * 1
+    time.sleep(1)
+    LEFT_KIT.motor3.throttle = POLARITY_TABLE['left_kit'][3] * -1
+    time.sleep(1)
+    LEFT_KIT.motor3.throttle = None

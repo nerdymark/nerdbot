@@ -111,8 +111,6 @@ def turn_right(speed):
 def move_left(speed):
     """
     Move the robot left
-    Motor2 on RIGHT_KIT and LEFT_LIT are equipped with omni wheels, so they don't need to move
-    TODO: This doesn't work yet
     """
     RIGHT_MOTOR_1.throttle = POLARITY_TABLE['right_kit'][1] * speed
     RIGHT_MOTOR_2.throttle = 0
@@ -128,8 +126,6 @@ def move_left(speed):
 def move_right(speed):
     """
     Move the robot right
-    Motor2 needs the extra speed to move the robot in the desired direction
-    TODO: This doesn't work yet
     """
     RIGHT_MOTOR_1.throttle = POLARITY_TABLE['right_kit'][1] * -speed
     RIGHT_MOTOR_2.throttle = 0

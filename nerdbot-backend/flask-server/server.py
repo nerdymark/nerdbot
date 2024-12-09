@@ -1,3 +1,7 @@
+"""
+The main Flask application for the nerdbot backend
+"""
+from datetime import datetime, timedelta
 import re
 import time
 import io
@@ -6,14 +10,16 @@ import subprocess
 import traceback
 import logging
 import json
-from random import randint
+from random import randint, shuffle
 import os
 import sys
+from threading import Condition
+from functools import lru_cache
+import cv2
 from flask import Flask, Response, render_template, jsonify
 from flask_restful import Api
 from flask_cors import CORS
-from threading import Condition
-# import picamera2
+from flask_apscheduler import APScheduler
 import libcamera
 import numpy as np
 import pyaudio
@@ -24,8 +30,6 @@ from picamera2.outputs import FileOutput
 from picamera2.devices import Hailo, IMX500
 from picamera2.devices.imx500 import NetworkIntrinsics, postprocess_nanodet_detection
 from picamera2.devices.imx500.postprocess import scale_boxes
-from functools import lru_cache
-import cv2
 from motor_control import motors
 from servo_control import servos
 # from light_bar import light_bar
@@ -59,7 +63,9 @@ logging.getLogger('flask_cors').level = logging.WARN
 app = Flask(__name__)
 app.config['CORS_HEADERS'] = 'Content-Type'
 api = Api(app)
-audio1 = pyaudio.PyAudio()
+scheduler = APScheduler()
+scheduler.init_app(app)
+scheduler.start()
 # lightbar = light_bar.LightBar()
 
 CORS(app)  # Enable CORS for all routes
@@ -67,25 +73,26 @@ CORS(app)  # Enable CORS for all routes
 MEME_SOUNDS_FOLDER = config.get('meme_sounds_folder')
 MEME_SOUNDS_FOLDER_CONVERTED = config.get('meme_sounds_folder_converted')
 MEME_SOUNDS = os.listdir(MEME_SOUNDS_FOLDER_CONVERTED)
+# MEME_SOUNDS = os.listdir(MEME_SOUNDS_FOLDER)
 
 DETECT_LABELS = [
     "person",
-    "bicycle",
-    "car",
-    "motorcycle",
-    "airplane",
-    "bus",
-    "train",
-    "truck",
+    # "bicycle",
+    # "car",
+    # "motorcycle",
+    # "airplane",
+    # "bus",
+    # "train",
+    # "truck",
     "bird",
     "cat",
     "dog",
-    "sports ball",
-    "cell phone"
+    # "sports ball",
+    # "cell phone"
     ]
 
 HAILO_DETECT_MODEL = "/usr/share/hailo-models/yolov8s_h8l.hef"
-IMX500_DETECT_MODEL = "/usr/share/imx500-models/imx500_network_ssd_mobilenetv2_fpnlite_320x320_pp.rpk"
+IMX500_DETECT_MODEL = "/usr/share/imx500-models/imx500_network_ssd_mobilenetv2_fpnlite_320x320_pp.rpk"  # pylint: disable=line-too-long
 IMX500_COCO_LABELS_FILE = "/usr/share/imx500-models/coco_labels.txt"
 IMX500_IOU = 0.65
 IMX500_MAX_DETECTIONS = 10
@@ -104,7 +111,6 @@ elif intrinsics.task != "object detection":
 # TTS Variables
 PIPER_DIR = "/home/mark/.local/bin"
 TTS_MODEL = "/home/mark/nerdbot-backend/en_US-lessac-medium.onnx"
-# TTS_VOICE = PiperVoice.load(TTS_MODEL)
 
 
 def piper_tts(text):
@@ -180,9 +186,12 @@ class StreamingOutput(io.BufferedIOBase):
         Write the buffer to the frame data
     """
     def __init__(self):
+        self.thread = None
         self.frame = None
         self.buffer = io.BytesIO()
         self.condition = Condition()
+
+        self.running = None
 
     def write(self, buf):
         self.buffer.truncate()
@@ -203,6 +212,9 @@ class StreamingOutput(io.BufferedIOBase):
 
 @lru_cache
 def imx500_get_labels():
+    """
+    Load the labels
+    """
     labels = intrinsics.labels
     if intrinsics.ignore_dash_labels:
         labels = [label for label in labels if label and label != "-"]
@@ -234,10 +246,13 @@ def draw_detections_imx500(request, stream="main"):
     with MappedArray(request, stream) as m:
         for detection in detections:
             x, y, w, h = detection.box
-            label = f"{labels[int(detection.category)]} ({detection.conf:.2f})"
+            try:
+                label = f"{labels[int(detection.category)]} ({detection.conf:.2f})"
+            except IndexError:
+                label = f"Unknown {detection.category} ({detection.conf:.2f})"
 
             # Calculate text size and position
-            (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)  # pylint: disable=no-member
+            (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)  # pylint: disable=no-member,disable=line-too-long
             text_x = x + 5
             text_y = y + 15
 
@@ -256,16 +271,16 @@ def draw_detections_imx500(request, stream="main"):
 
             # Draw text on top of the background
             cv2.putText(m.array, label, (text_x, text_y),  # pylint: disable=no-member
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)  # pylint: disable=no-member
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)  # pylint: disable=no-member
 
             # Draw detection box
-            cv2.rectangle(m.array, (x, y), (x + w, y + h), (0, 255, 0, 0), thickness=2) # pylint: disable=no-member
+            cv2.rectangle(m.array, (x, y), (x + w, y + h), (255, 255, 255, 0), thickness=2) # pylint: disable=no-member
 
         if intrinsics.preserve_aspect_ratio:
             b_x, b_y, b_w, b_h = imx500.get_roi_scaled(request)
             color = (255, 0, 0)  # red
-            cv2.putText(m.array, "ROI", (b_x + 5, b_y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)  # pylint: disable=no-member
-            cv2.rectangle(m.array, (b_x, b_y), (b_x + b_w, b_y + b_h), (255, 0, 0, 0))  # pylint: disable=no-member
+            cv2.putText(m.array, "ROI", (b_x + 5, b_y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)  # pylint: disable=no-member,disable=line-too-long
+            cv2.rectangle(m.array, (b_x, b_y), (b_x + b_w, b_y + b_h), (255, 255, 255, 0))  # pylint: disable=no-member
 
 
 def draw_objects_hailo(request):
@@ -316,14 +331,19 @@ def run_detection_camera_0_imx500():
                     """
                     def __init__(self, coords, category, conf, metadata):
                         """
-                        Create a Detection object, recording the bounding box, category and confidence.
+                        Create a Detection object, recording the bounding box,
+                        category and confidence.
                         """
                         self.category = category
                         self.conf = conf
-                        self.box = imx500.convert_inference_coords(coords, metadata, picam2)
-                
+                        self.box = imx500.convert_inference_coords(
+                            coords, metadata, picam2)
+
                 def parse_detections_imx500(metadata: dict):
-                    """Parse the output tensor into a number of detected objects, scaled to the ISP output."""
+                    """
+                    Parse the output tensor into a number of detected objects,
+                    scaled to the ISP output.
+                    """
                     bbox_normalization = intrinsics.bbox_normalization
                     bbox_order = intrinsics.bbox_order
                     threshold = SCORE_THRESH
@@ -335,11 +355,12 @@ def run_detection_camera_0_imx500():
                         return []
                     if intrinsics.postprocess == "nanodet":
                         boxes, scores, classes = \
-                            postprocess_nanodet_detection(outputs=np_outputs[0], conf=threshold, iou_thres=iou,
-                                                        max_out_dets=max_detections)[0]
+                            postprocess_nanodet_detection(
+                                outputs=np_outputs[0], conf=threshold, iou_thres=iou,
+                                max_out_dets=max_detections)[0]
                         boxes = scale_boxes(boxes, 1, 1, input_h, input_w, False, False)
                     else:
-                        boxes, scores, classes = np_outputs[0][0], np_outputs[1][0], np_outputs[2][0]
+                        boxes, scores, classes = np_outputs[0][0], np_outputs[1][0], np_outputs[2][0]  # pylint: disable=line-too-long
                         if bbox_normalization:
                             boxes = boxes / input_h
 
@@ -360,8 +381,10 @@ def run_detection_camera_0_imx500():
                 controls = {"FrameRate": intrinsics.inference_rate}
                 config_imx500 = picam2.create_preview_configuration(main,
                                                                     lores=lores,
-                                                                    controls=controls, buffer_count=12)
-                imx500.show_network_fw_progress_bar()
+                                                                    controls=controls,  # pylint: disable=line-too-long
+                                                                    buffer_count=12)
+                # imx500.show_network_fw_progress_bar()
+                # time.sleep(5)
                 picam2.configure(config_imx500)
                 picam2.start_recording(encoder=JpegEncoder(), output=FileOutput(output_main))
 
@@ -450,59 +473,61 @@ def run_detection_camera_0_hailo(model, labels, score_thresh):
     return output_main
 
 
-def start_camera_1():
+def start_camera_1() -> StreamingOutput:
     """
-    Use camera 1 to stream video to StreamOutput
+    Use camera 1 to stream video to StreamingOutput
     """
     logger = logging.getLogger(__name__)
     output_rear = StreamingOutput()
     running = threading.Event()
     running.set()
 
+    resolution = (640, 480)
+    frame_rate = 30
+    cformat = 'XRGB8888'
+    transform = libcamera.Transform(hflip=True, vflip=True)  # pylint: disable=no-member
+
     def camera_thread():
         recording = False
         try:
             with Picamera2(camera_num=1) as picam2:
-                main = {'size': (640, 480), 'format': 'XRGB8888'}
-                controls = {'FrameRate': 30}
-                transform = libcamera.Transform(hflip=True, vflip=True)
-                picamera_config = picam2.create_preview_configuration(main,
-                                                                      controls=controls,
-                                                                      transform=transform)
+                cam1_config = {
+                    'size': resolution,
+                    'format': cformat
+                }
+                controls = {'FrameRate': frame_rate}
+
+                picamera_config = picam2.create_preview_configuration(
+                    main=cam1_config,
+                    controls=controls,
+                    transform=transform
+                )
                 picam2.configure(picamera_config)
-                
+
                 picam2.start_recording(encoder=JpegEncoder(), output=FileOutput(output_rear))
                 recording = True
-                
+                logger.info("Camera 1 recording started.")
+
                 # Keep thread alive while recording
                 while running.is_set():
-                    try:
-                        time.sleep(1)
-                    except Exception as e:
-                        logger.error('Recording error: %s', e)
+                    if not running.wait(timeout=1):
                         break
-                
-                # Cleanup
-                if recording:
-                    picam2.stop_recording()
-                    recording = False
-                
-        except Exception as e:
-            logger.error('Camera thread error: %s', e)
+
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error('Camera thread encountered PiCameraError: %s', e)
             if recording:
                 try:
                     picam2.stop_recording()
-                except:
-                    pass
+                    logger.info("Camera 1 recording stopped due to error.")
+                except Exception as se:  # pylint: disable=broad-except
+                    logger.error('Error stopping recording: %s', se)
         finally:
             running.clear()
+            logger.info("Camera thread has been cleaned up.")
 
     thread = threading.Thread(target=camera_thread, daemon=True)
     thread.start()
-    
-    # Store thread reference for cleanup
-    output_rear.thread = thread
-    output_rear.running = running
+    logger.info("Camera thread started.")
 
     return output_rear
 
@@ -569,61 +594,11 @@ def cam1():
     return Response(frame_generator(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
-# @retry(delay=2, backoff=3, max_delay=10)
-# def coqui_tts(text):
-#     """
-#     Send the text to the Coqui TTS server and return the audio
-#     """
-#     response = requests.get(COQUI_URL + COQUI_ENDPOINT + text)
-#     audio = response.content
-#     return audio
-
-
-# @retry(delay=2, backoff=3, max_delay=10)
-# def play_audio(audio):
-#     """
-#     Speed up the audio with pydub
-#     Play the audio using PyAudio
-#     """
-#     audio = AudioSegment.from_wav(io.BytesIO(audio))
-#     print('Audio Length:', len(audio))
-#     audio = audio.speedup(playback_speed=1.15)
-#     print('new Audio Length:', len(audio))
-#     # Make sure the audio is in the correct format
-#     audio = audio.set_frame_rate(AUDIO_RATE)
-#     audio = audio.set_channels(1)
-#     audio = audio.set_sample_width(2)  # 2 bytes for paInt16
-
-#     # Convert AudioSegment to raw audio data
-#     raw_data = audio.raw_data
-
-#     # Open a stream
-#     stream = audio1.open(format=pyaudio.paInt16,
-#                          output_device_index=AUDIO_DEVICE_INDEX,
-#                          channels=1,
-#                          rate=AUDIO_RATE,
-#                          frames_per_buffer=AUDIO_CHUNK,
-#                          output=True)
-
-#     # Write raw audio data to the stream
-#     stream.write(raw_data)
-#     stream.stop_stream()
-#     stream.close()
-
-#     return "Audio Played"
-
-
-# def text_to_speech(text):
-#     """
-#     Convert text to speech using Coqui TTS
-#     """
-#     audio = coqui_tts(text)
-#     play_audio(audio)
-#     return "Text to Speech Complete"
-
-
 @app.route('/api/motor/<string:direction>', methods=['GET', 'POST'])
 def motor_control(direction):
+    """
+    Control the motors in the specified direction
+    """
     if direction == 'forward':
         # text_to_speech("Moving Forward")
         motors.move_forward(0.75)
@@ -663,8 +638,8 @@ def motor_control(direction):
     elif direction == 'stop':
         # text_to_speech("Stopping")
         motors.stop()
-    
-    return jsonify({'message': 'Motor Control Complete'}), 200  # Return JSON response with HTTP 200 status
+
+    return jsonify({'message': 'Motor Control Complete'}), 200
 
 
 @app.route('/api/pan/<string:direction>', methods=['GET', 'POST'])
@@ -691,7 +666,7 @@ def pan(direction):
         TILT_ANGLE = servo_angle
         print(f"Tilted forward to {servo_angle}")
 
-    return jsonify({'message': f"Panned {direction} to {PAN_ANGLE}"}), 200  # Return JSON response with HTTP 200 status
+    return jsonify({'message': f"Panned {direction} to {PAN_ANGLE}"}), 200
 
 
 @app.route('/api/tilt/<string:direction>', methods=['GET', 'POST'])
@@ -722,79 +697,116 @@ def tts(text):
     return jsonify({'message': result}), 200  # Return JSON response with HTTP 200 status
 
 
+@app.route('/audio')
 def stream_audio():
     """
     Stream audio from the default audio input device
+    TODO: This doesn't work yet.
     """
+    logger = logging.getLogger(__name__)
+
+    # List the available audio input devices
+    p = pyaudio.PyAudio()
+    info = p.get_host_api_info_by_index(0)
+    numdevices = info.get('deviceCount')
+
+    for i in range(0, numdevices):
+        if (p.get_device_info_by_host_api_device_index(0, i).get('maxInputChannels')) > 0:
+            logstr = f"Input Device id {i} - {p.get_device_info_by_host_api_device_index(0, i).get('name')}"
+            logger.info(logstr)
+
     def sound():
         """
         Generate audio data from the default audio input device
         """
-        sampleRate = AUDIO_RATE
-        bitsPerSample = 16
+        sample_rate = AUDIO_RATE
+        bits_per_sample = 16
         channels = 2
-        wav_header = genHeader(sampleRate, bitsPerSample, channels)
+        wav_header = gen_header(sample_rate, bits_per_sample, channels)
 
-        stream = audio1.open(output_device_index=AUDIO_DEVICE_INDEX,
-                             format=AUDIO_FORMAT,
-                             channels=AUDIO_CHANNELS,
-                             rate=AUDIO_RATE,
-                             input=True,
-                             frames_per_buffer=AUDIO_CHUNK)
-        print("recording...")
+        audio2 = pyaudio.PyAudio()
+
+        # What's the name of the audio input device?
+        pa_device_inf = audio2.get_default_input_device_info()
+        logger.info('Default Input Device Info: %s', pa_device_inf)
+
+        time.sleep(9999)
+
+        try:
+            stream = audio2.open(
+                input_device_index=AUDIO_DEVICE_INDEX,
+                # output_device_index=AUDIO_DEVICE_INDEX,
+                format=AUDIO_FORMAT,
+                channels=AUDIO_CHANNELS,
+                rate=AUDIO_RATE,
+                input=True,
+                frames_per_buffer=AUDIO_CHUNK * 2)  # Increase buffer size
+            logger.info("Audio stream opened successfully")
+        except Exception as e:  # pylint: disable=broad-except
+            logger.info("Failed to open audio stream: %s", e)
+            return
+
+        logger.info("recording from %s", pa_device_inf['name'])
         first_run = True
         while True:
-            if first_run:
-                data = wav_header + stream.read(AUDIO_CHUNK)
-                first_run = False
-            else:
-                data = stream.read(AUDIO_CHUNK)
-            yield data
+            try:
+                if first_run:
+                    data = wav_header + stream.read(AUDIO_CHUNK)
+                    first_run = False
+                else:
+                    data = stream.read(AUDIO_CHUNK)
+                yield data
+            except IOError as e:
+                logger.info(f"Input overflowed: {e}")
+                continue
+            except Exception as e:  # pylint: disable=broad-except
+                logger.info(f"An error occurred: {e}")
+                break
 
     return Response(sound(), mimetype="audio/wav")
 
 
-def genHeader(sampleRate, bitsPerSample, channels):
+def gen_header(sample_rate, bits_per_sample, channels):
     """
     Generate the WAV header
     """
-    datasize = 2000*10**6  # Some large number to indicate streaming
-    o = bytes("RIFF", 'ascii')                                   # (4byte) Marks file as RIFF
-    o += (datasize + 36).to_bytes(4, 'little')                   # (4byte) File size in bytes excluding this and RIFF marker
-    o += bytes("WAVE", 'ascii')                                  # (4byte) File type
-    o += bytes("fmt ", 'ascii')                                  # (4byte) Format Chunk Marker
-    o += (16).to_bytes(4, 'little')                              # (4byte) Length of above format data
-    o += (1).to_bytes(2, 'little')                               # (2byte) Format type (1 - PCM)
-    o += (channels).to_bytes(2, 'little')                        # (2byte)
-    o += (sampleRate).to_bytes(4, 'little')                      # (4byte)
-    o += (sampleRate * channels * bitsPerSample // 8).to_bytes(4, 'little')  # (4byte)
-    o += (channels * bitsPerSample // 8).to_bytes(2, 'little')   # (2byte)
-    o += (bitsPerSample).to_bytes(2, 'little')                   # (2byte)
-    o += bytes("data", 'ascii')                                  # (4byte) Data Chunk Marker
-    o += (datasize).to_bytes(4, 'little')                        # (4byte) Data size in bytes
+    datasize = 2000*10**6
+    o = bytes("RIFF", 'ascii')
+    o += (datasize + 36).to_bytes(4, 'little')
+    o += bytes("WAVE", 'ascii')
+    o += bytes("fmt ", 'ascii')
+    o += (16).to_bytes(4, 'little')
+    o += (1).to_bytes(2, 'little')
+    o += (channels).to_bytes(2, 'little')
+    o += (sample_rate).to_bytes(4, 'little')
+    o += (sample_rate * channels * bits_per_sample // 8).to_bytes(4, 'little')
+    o += (channels * bits_per_sample // 8).to_bytes(2, 'little')
+    o += (bits_per_sample).to_bytes(2, 'little')
+    o += bytes("data", 'ascii')
+    o += (datasize).to_bytes(4, 'little')
     return o
 
 
 def convert_sound_file(sound_file):
     """
-    Convert the sound file to the preferred format with the correct sample rate using wave and pyaudio
+    Convert the sound file to the preferred format with the correct sample
+    rate using wave and pyaudio
     """
     logger = logging.getLogger(__name__)
     audio = open(MEME_SOUNDS_FOLDER + sound_file, 'rb').read()
     out_file = MEME_SOUNDS_FOLDER_CONVERTED + sound_file
-    # Skip if the file already exists
+
     if os.path.exists(out_file):
         return out_file
-    # Create the folder if it doesn't exist
+
     if not os.path.exists(MEME_SOUNDS_FOLDER_CONVERTED):
         os.makedirs(MEME_SOUNDS_FOLDER_CONVERTED)
 
-    # Convert the audio file to the preferred format
     audio = AudioSegment.from_mp3(io.BytesIO(audio))
     audio = audio.set_frame_rate(AUDIO_RATE)
     audio = audio.set_channels(1)
     audio = audio.set_sample_width(2)
-    audio.export(MEME_SOUNDS_FOLDER_CONVERTED + sound_file, format='wav')
+    audio.export(MEME_SOUNDS_FOLDER_CONVERTED + sound_file, format='mp3')
     logger.info('Converted %s', sound_file)
     return out_file
 
@@ -807,16 +819,98 @@ def convert_all_sound_files():
     for sound in MEME_SOUNDS:
         logger.info('Converting %s', sound)
         convert_sound_file(sound)
-    
+
+
+# Start the detection tracking job on server startup
+@scheduler.task('date', id='track_detections', next_run_time=datetime.now() + timedelta(seconds=10))
+def track_detections_front():
+    """
+    Track the detections in the front camera feed
+    """
+    logger = logging.getLogger(__name__)
+    labels = imx500_get_labels()
+    while True:
+        largest_object = None
+        largest_object_label = None
+        label = None
+
+        for detection in DETECTIONS['front_camera']:
+            # Check the box size
+            if largest_object is None or detection.box[2] * detection.box[3] > largest_object.box[2] * largest_object.box[3]:  # pylint: disable=line-too-long
+                label = f"{labels[int(detection.category)]} ({detection.conf:.2f})"
+                # logger.info(dir(detection))
+                largest_object = detection
+                largest_object_label = label.split(' ')[0]
+        
+        # logger.info('Largest Object: %s', largest_object_label)
+
+        if largest_object is not None and largest_object_label in DETECT_LABELS:
+            # logger.info('Tracking Object: %s', label)
+            x, y, w, h = largest_object.box  # pylint: disable=unused-variable
+            # Move the servos to track the object across a 640x480 frame
+            if x + (w / 2) < 280:
+                try:
+                    servos.pan('left')
+                except ValueError:
+                    pass
+            elif x + (w / 2) > 360:
+                try:
+                    servos.pan('right')
+                except ValueError:
+                    pass
+            if y - (h / 2) < 200:
+                try:
+                    servos.tilt('up')
+                    # Tilt up a couple more times to get to a person's face
+                    servos.tilt('up')
+                    servos.tilt('up')
+                except ValueError:
+                    pass
+            elif y - (h / 2) > 280:
+                try:
+                    servos.tilt('down')
+                except ValueError:
+                    pass
+
+            # If the bounding box has an edge near the image edge, pan / tilt towards it
+            if x < 50:
+                try:
+                    servos.pan('left')
+                except ValueError:
+                    pass
+            elif x + w > 590:
+                try:
+                    servos.pan('right')
+                except ValueError:
+                    pass
+            if y < 50:
+                try:
+                    servos.tilt('up')
+                except ValueError:
+                    pass
+            elif y + h > 430:
+                try:
+                    servos.tilt('down')
+                except ValueError:
+                    pass
+
+        time.sleep(0.5)
+
 
 @app.route('/api/meme_sound/<int:sound_id>', methods=['GET', 'POST'])
 def meme_sound(sound_id):
+    """
+    Play the meme sound with the specified sound_id
+    """
     if sound_id < 0 or sound_id >= len(MEME_SOUNDS):
         return jsonify({'message': 'Invalid sound_id'}), 400
 
     sound = MEME_SOUNDS[sound_id]
+
+    audio1 = pyaudio.PyAudio()
+
     stream = audio1.open(format=pyaudio.paInt16,
-                         output_device_index=AUDIO_DEVICE_INDEX,
+                         # output_device_index=AUDIO_DEVICE_INDEX,
                          channels=1,
                          rate=AUDIO_RATE,
                          frames_per_buffer=AUDIO_CHUNK,
@@ -844,15 +938,23 @@ def meme_sound(sound_id):
 
 @app.route('/api/meme_sound/random', methods=['GET', 'POST'])
 def random_meme_sound():
+    """
+    Play a random meme sound from the MEME_SOUNDS_FOLDER_CONVERTED
+    """
+    logger = logging.getLogger(__name__)
+    shuffle(MEME_SOUNDS)  # Shuffle the list to avoid repetition
     sound_id = randint(0, len(MEME_SOUNDS) - 1)
     sound = MEME_SOUNDS[sound_id]
+    logger.info('Playing %s', sound)
     try:
+        audio1 = pyaudio.PyAudio()
+
         stream = audio1.open(format=pyaudio.paInt16,
-                       output_device_index=AUDIO_DEVICE_INDEX,
-                       channels=1,
-                       rate=AUDIO_RATE,
-                       frames_per_buffer=AUDIO_CHUNK,
-                       output=True)
+                             output_device_index=AUDIO_DEVICE_INDEX,
+                             channels=1,
+                             rate=AUDIO_RATE,
+                             frames_per_buffer=AUDIO_CHUNK,
+                             output=True)
         audio = open(MEME_SOUNDS_FOLDER_CONVERTED + sound, 'rb').read()
         audio = AudioSegment.from_mp3(io.BytesIO(audio))
         audio = audio.set_frame_rate(AUDIO_RATE)
@@ -860,8 +962,10 @@ def random_meme_sound():
         audio = audio.set_sample_width(2)
         raw_data = audio.raw_data
         stream.write(raw_data)
+        time.sleep(len(raw_data) / (AUDIO_RATE * 2))  # Add delay to ensure audio plays completely
         stream.stop_stream()
         stream.close()
+        audio1.terminate()  # Ensure resources are released
         return jsonify({'message': f'Meme Sound Played: {sound}'}), 200
     except Exception as e:  # pylint: disable=broad-except
         pa_device_inf = audio1.get_default_output_device_info()
@@ -881,15 +985,20 @@ def health():
 
 @app.route('/')
 def index():
+    """
+    Render the index.html template
+    """
     return render_template('index.html')
 
 
 if __name__ == '__main__':
     servos.reset_servos()
     convert_all_sound_files()
-    # lightbar.turn_on()
-    servos.laser_on()
-    time.sleep(1)
-    servos.laser_off()
+
+    # Start the front camera stream
+    # cam0()
+
+    # Start a thread to track the largest object in the front camera feed
+    threading.Thread(target=track_detections_front, daemon=True).start()
 
     app.run(debug=False, host = '0.0.0.0', port=5000)

@@ -1,0 +1,16 @@
+{
+    "log_file": "/home/mark/nerdbot.log",
+    "watchdog_timeout": 10,
+    "default_gateway": "10.0.1.1",
+    "health_url_flask": "http://localhost:5000/api/health",
+    "health_url_vite_react": "http://localhost:5173",
+    "health_url_coqui_tts": "http://localhost:5002",
+    "health_url_darkice": "http://localhost:8000/Stream.mp3",
+    "runas_user": "mark",
+    "vite_react_startup_script": "/home/mark/nerdbot-scripts/vite-react-startup.sh",
+    "flask_startup_script": "/home/mark/nerdbot-scripts/flask-startup.sh",
+    "coqui_tts_startup_script": "/home/mark/nerdbot-scripts/tts-startup.sh",
+    "darkice_startup_script": "/home/mark/nerdbot-scripts/darkice-startup.sh",
+    "meme_sounds_folder": "/home/mark/nerdbot-backend/assets/meme_sounds/",
+    "meme_sounds_folder_converted": "/home/mark/nerdbot-backend/assets/meme_sounds_converted/"
+}

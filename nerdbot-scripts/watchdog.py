@@ -23,9 +23,11 @@ DEFAULT_GATEWAY = config.get('default_gateway')
 VITE_REACT_HEALTH_URL = config.get('health_url_vite_react')
 FLASK_HEALTH_URL = config.get('health_url_flask')
 TTS_HEALTH_URL = config.get('health_url_coqui_tts')
+DARKICE_HEALTH_URL = config.get('health_url_darkice')
 VITE_REACT_STARTUP_SCRIPT = config.get('vite_react_startup_script')
 FLASK_STARTUP_SCRIPT = config.get('flask_startup_script')
 TTS_STARTUP_SCRIPT = config.get('coqui_tts_startup_script')
+DARKICE_STARTUP_SCRIPT = config.get('darkice_startup_script')
 BOT_RUNAS_USER = config.get('runas_user')
 
 
@@ -50,6 +52,15 @@ def test_flask_health():
 def test_tts_health():
     try:
         response = requests.get(TTS_HEALTH_URL)
+        if response.status_code == 200:
+            return True
+    except requests.exceptions.ConnectionError:
+        return False
+
+
+def test_darkice_health():
+    try:
+        response = requests.get(DARKICE_HEALTH_URL)
         if response.status_code == 200:
             return True
     except requests.exceptions.ConnectionError:
@@ -105,15 +116,13 @@ while True:
         logger.warning("Flask is down, restarting Flask as %s", BOT_RUNAS_USER)
         # Restart Flask as BOT_RUNAS_USER
         subprocess.call(["sudo", "-u", BOT_RUNAS_USER, FLASK_STARTUP_SCRIPT, "&"])
-    # else:
-    #     logger.info("Flask is up")
-    # if not test_tts_health():
-    #     logger.warning("Coqui TTS is down, restarting TTS as %s", BOT_RUNAS_USER)
-        # Restart Coqui TTS as BOT_RUNAS_USER
-    #     subprocess.call(["sudo", "-u", BOT_RUNAS_USER, TTS_STARTUP_SCRIPT, "&"])
-    # else:
-    #     logger.info("Coqui TTS is up")
-    
+
+    if not test_darkice_health():
+        logger.warning("Darkice is down, restarting Darkice as root")
+        # Restart Darkice as BOT_RUNAS_USER
+        subprocess.call([DARKICE_STARTUP_SCRIPT, "&"])
+
+
     # Delete the log file is it's too big
     if os.path.getsize(LOG_FILE) > 1000000:
         with open(LOG_FILE, 'w') as f:

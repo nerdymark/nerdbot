@@ -12,5 +12,6 @@
     "coqui_tts_startup_script": "/home/mark/nerdbot-scripts/tts-startup.sh",
     "darkice_startup_script": "/home/mark/nerdbot-scripts/darkice-startup.sh",
     "meme_sounds_folder": "/home/mark/nerdbot-backend/assets/meme_sounds/",
-    "meme_sounds_folder_converted": "/home/mark/nerdbot-backend/assets/meme_sounds_converted/"
+    "meme_sounds_folder_converted": "/home/mark/nerdbot-backend/assets/meme_sounds_converted/",
+    "google_gemini_key": ""
 }

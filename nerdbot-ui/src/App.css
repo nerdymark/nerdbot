@@ -151,16 +151,15 @@
 }
 
 .chat-box {
-  display: flex;
   align-items: center;
   gap: 10px;
 }
 
 .message-input {
-  flex: 1;
   padding: 10px;
   font-size: 16px;
   height: 100%;
+  width: 80%;
 }
 
 .send-button {
@@ -171,4 +170,13 @@
 
 .disable-dbl-tap-zoom {
   touch-action: manipulation;
+}
+
+.visual-description {
+    width: auto;
+}
+.visual-description div {
+    display: inline-block;
+    position: relative;
+    margin: 0 20%;
 }

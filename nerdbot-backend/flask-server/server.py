@@ -1,6 +1,7 @@
 """
 The main Flask application for the nerdbot backend
 """
+# import collections
 from datetime import datetime, timedelta
 import re
 import time
@@ -10,13 +11,16 @@ import subprocess
 import traceback
 import logging
 import json
+# import struct
 from random import randint, shuffle
 import os
 import sys
-from threading import Condition
+# import wave
+# import audioop
+from collections import deque
 from functools import lru_cache
 import cv2
-from flask import Flask, Response, render_template, jsonify
+from flask import Flask, Response, render_template, jsonify  # , stream_with_context
 from flask_restful import Api
 from flask_cors import CORS
 from flask_apscheduler import APScheduler
@@ -30,6 +34,8 @@ from picamera2.outputs import FileOutput
 from picamera2.devices import Hailo, IMX500
 from picamera2.devices.imx500 import NetworkIntrinsics, postprocess_nanodet_detection
 from picamera2.devices.imx500.postprocess import scale_boxes
+from PIL import Image
+import google.generativeai as genai
 from motor_control import motors
 from servo_control import servos
 # from light_bar import light_bar
@@ -46,8 +52,10 @@ AUDIO_RECORD_SECONDS = 5
 AUDIO_DEVICE_INDEX = 0
 DETECTIONS = {
     "front_camera": [],
-    "rear_camera": []
+    "rear_camera": [],
+    "gemini_data": []
 }
+DETECTIONS_ENABLED = True
 
 DETECTIONS_USE_HAILO = False  # Use IMX500 board for object detection
 
@@ -70,6 +78,7 @@ scheduler.start()
 
 CORS(app)  # Enable CORS for all routes
 
+GOOGLE_GEMINI_KEY = config.get('google_gemini_key')
 MEME_SOUNDS_FOLDER = config.get('meme_sounds_folder')
 MEME_SOUNDS_FOLDER_CONVERTED = config.get('meme_sounds_folder_converted')
 MEME_SOUNDS = os.listdir(MEME_SOUNDS_FOLDER_CONVERTED)
@@ -98,6 +107,16 @@ IMX500_IOU = 0.65
 IMX500_MAX_DETECTIONS = 10
 SCORE_THRESH = 0.5
 
+genai.configure(api_key=GOOGLE_GEMINI_KEY)
+gemini_vision_model = genai.GenerativeModel('models/gemini-1.5-flash')
+gemini_vision_prompt = """You are a a digital assistant designed to provide visual feedback for blind 
+individuals, helping them navigate their surroundings. Upon receiving an image, describe 
+in detail the key objects and structures, including their relative positions and contextual 
+information. Your responses should be concise, clear, and informative, 
+enabling users to orient themselves effectively. Additionally, learn and adapt to frequently 
+visited places to provide personalized guidance. Be natural in your responses, and focus on 
+providing valuable assistance to empower your users in their daily navigation."""
+
 
 imx500 = IMX500(IMX500_DETECT_MODEL)
 intrinsics = imx500.network_intrinsics
@@ -113,10 +132,20 @@ PIPER_DIR = "/home/mark/.local/bin"
 TTS_MODEL = "/home/mark/nerdbot-backend/en_US-lessac-medium.onnx"
 
 
-def piper_tts(text):
+def piper_tts(text, mode=None):
     """
     Generate speech using Piper TTS with proper pipeline handling
     """
+
+    modes = [
+        'slow',
+        'fast',
+        'yelling',
+        'whispering',
+        'robotic',
+        'echo',
+        'reverse',
+    ]
 
     # Sanitize input text
     text_regex = re.compile(r'[^A-Za-z0-9 ]+')
@@ -132,7 +161,7 @@ def piper_tts(text):
             stderr=subprocess.PIPE
         )
         p3 = subprocess.Popen(
-            ['aplay', '-r', '22050', '-f', 'S16_LE', '-t', 'raw', '-c', '1', '-v'],
+            ['aplay', '-r', '22050', '-f', 'S16_LE', '-t', 'raw', '-c', '1', '-v', '--device', 'plughw:0,0'],
             stdin=p2.stdout,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
@@ -167,6 +196,24 @@ def piper_tts(text):
         raise
 
 
+# def create_wav_header(sample_rate, bits_per_sample, channels):
+#     datasize = 2000*10**6  # Some large number to act as a placeholder
+#     o = bytes("RIFF", 'ascii')                                               # (4byte) Marks file as RIFF
+#     o += struct.pack('<I', datasize + 36)                                     # (4byte) File size in bytes excluding this and RIFF marker
+#     o += bytes("WAVE", 'ascii')                                               # (4byte) File type
+#     o += bytes("fmt ", 'ascii')                                               # (4byte) Format Chunk Marker
+#     o += struct.pack('<I', 16)                                                # (4byte) Length of above format data
+#     o += struct.pack('<H', 1)                                                 # (2byte) Format type (1 - PCM)
+#     o += struct.pack('<H', channels)                                          # (2byte)
+#     o += struct.pack('<I', sample_rate)                                       # (4byte)
+#     o += struct.pack('<I', sample_rate * channels * bits_per_sample // 8)     # (4byte)
+#     o += struct.pack('<H', channels * bits_per_sample // 8)                   # (2byte)
+#     o += struct.pack('<H', bits_per_sample)                                   # (2byte)
+#     o += bytes("data", 'ascii')                                               # (4byte) Data Chunk Marker
+#     o += struct.pack('<I', datasize)                                          # (4byte) Data size in bytes
+#     return o
+
+
 class StreamingOutput(io.BufferedIOBase):
     """
     A class to represent a streaming output
@@ -185,12 +232,13 @@ class StreamingOutput(io.BufferedIOBase):
     write(buf)
         Write the buffer to the frame data
     """
-    def __init__(self):
+    def __init__(self, maxlen=1000):
         self.thread = None
         self.frame = None
         self.buffer = io.BytesIO()
-        self.condition = Condition()
-
+        self.condition = threading.Condition()
+        self.frames = deque(maxlen=maxlen)
+        self.last_write = time.time()
         self.running = None
 
     def write(self, buf):
@@ -200,6 +248,12 @@ class StreamingOutput(io.BufferedIOBase):
         with self.condition:
             self.frame = self.buffer.getvalue()
             self.condition.notify_all()
+
+    def write_audio(self, data):
+        with self.condition:
+            self.frames.append(data)
+            self.last_write = time.time()
+            self.condition.notify()
 
     def read_frame(self):
         """
@@ -532,9 +586,44 @@ def start_camera_1() -> StreamingOutput:
     return output_rear
 
 
+# def start_audio_stream() -> StreamingOutput:
+#     """
+#     Start the audio stream
+#     """
+#     logger = logging.getLogger(__name__)
+#     output_audio = StreamingOutput()
+
+#     def audio_thread():
+#         audio_in = pyaudio.PyAudio()
+#         logger.info('Audio Devices: %s', audio_in.get_device_count())
+#         stream = audio_in.open(format=AUDIO_FORMAT,
+#                                channels=AUDIO_CHANNELS,
+#                                rate=44100,
+#                                input=True,
+#                                frames_per_buffer=AUDIO_CHUNK,
+#                                input_device_index=0)
+        
+#         logger.info('Audio stream started. %s', stream)
+
+#         while True:
+#             try:
+#                 data = stream.read(AUDIO_CHUNK)
+#                 output_audio.write(data)
+#             except Exception as e:  # pylint: disable=broad-except
+#                 logger.error('Error reading audio stream: %s', e)
+#                 break
+
+#     thread = threading.Thread(target=audio_thread, daemon=True)
+#     thread.start()
+#     logger.info("Audio thread started.")
+
+#     return output_audio
+
+
 # Start the rear camera stream
 FRONT_CAMERA_OUTPUT = None
 REAR_CAMERA_OUTPUT = None
+AUDIO_OUTPUT = None
 
 
 @app.route('/cam0')
@@ -697,94 +786,47 @@ def tts(text):
     return jsonify({'message': result}), 200  # Return JSON response with HTTP 200 status
 
 
-@app.route('/audio')
-def stream_audio():
-    """
-    Stream audio from the default audio input device
-    TODO: This doesn't work yet.
-    """
-    logger = logging.getLogger(__name__)
-
-    # List the available audio input devices
-    p = pyaudio.PyAudio()
-    info = p.get_host_api_info_by_index(0)
-    numdevices = info.get('deviceCount')
-
-    for i in range(0, numdevices):
-        if (p.get_device_info_by_host_api_device_index(0, i).get('maxInputChannels')) > 0:
-            logstr = f"Input Device id {i} - {p.get_device_info_by_host_api_device_index(0, i).get('name')}"
-            logger.info(logstr)
-
-    def sound():
-        """
-        Generate audio data from the default audio input device
-        """
-        sample_rate = AUDIO_RATE
-        bits_per_sample = 16
-        channels = 2
-        wav_header = gen_header(sample_rate, bits_per_sample, channels)
-
-        audio2 = pyaudio.PyAudio()
-
-        # What's the name of the audio input device?
-        pa_device_inf = audio2.get_default_input_device_info()
-        logger.info('Default Input Device Info: %s', pa_device_inf)
-
-        time.sleep(9999)
-
-        try:
-            stream = audio2.open(
-                input_device_index=AUDIO_DEVICE_INDEX,
-                # output_device_index=AUDIO_DEVICE_INDEX,
-                format=AUDIO_FORMAT,
-                channels=AUDIO_CHANNELS,
-                rate=AUDIO_RATE,
-                input=True,
-                frames_per_buffer=AUDIO_CHUNK * 2)  # Increase buffer size
-            logger.info("Audio stream opened successfully")
-        except Exception as e:  # pylint: disable=broad-except
-            logger.info("Failed to open audio stream: %s", e)
-            return
-
-        logger.info("recording from %s", pa_device_inf['name'])
-        first_run = True
-        while True:
-            try:
-                if first_run:
-                    data = wav_header + stream.read(AUDIO_CHUNK)
-                    first_run = False
-                else:
-                    data = stream.read(AUDIO_CHUNK)
-                yield data
-            except IOError as e:
-                logger.info(f"Input overflowed: {e}")
-                continue
-            except Exception as e:  # pylint: disable=broad-except
-                logger.info(f"An error occurred: {e}")
-                break
-
-    return Response(sound(), mimetype="audio/wav")
+# def genHeader(sampleRate, bitsPerSample, channels):
+#     """
+#     Generate the WAV header
+#     """
+#     datasize = 2000*10**6
+#     o = bytes("RIFF",'ascii')
+#     o += (datasize + 36).to_bytes(4,'little')
+#     o += bytes("WAVE",'ascii')
+#     o += bytes("fmt ",'ascii')
+#     o += (16).to_bytes(4,'little')
+#     o += (1).to_bytes(2,'little')
+#     o += (channels).to_bytes(2,'little')
+#     o += (sampleRate).to_bytes(4,'little')
+#     o += (sampleRate * channels * bitsPerSample // 8).to_bytes(4,'little')
+#     o += (channels * bitsPerSample // 8).to_bytes(2,'little')
+#     o += (bitsPerSample).to_bytes(2,'little')
+#     o += bytes("data",'ascii')
+#     o += (datasize).to_bytes(4,'little')
+#     return o
 
 
-def gen_header(sample_rate, bits_per_sample, channels):
-    """
-    Generate the WAV header
-    """
-    datasize = 2000*10**6
-    o = bytes("RIFF", 'ascii')
-    o += (datasize + 36).to_bytes(4, 'little')
-    o += bytes("WAVE", 'ascii')
-    o += bytes("fmt ", 'ascii')
-    o += (16).to_bytes(4, 'little')
-    o += (1).to_bytes(2, 'little')
-    o += (channels).to_bytes(2, 'little')
-    o += (sample_rate).to_bytes(4, 'little')
-    o += (sample_rate * channels * bits_per_sample // 8).to_bytes(4, 'little')
-    o += (channels * bits_per_sample // 8).to_bytes(2, 'little')
-    o += (bits_per_sample).to_bytes(2, 'little')
-    o += bytes("data", 'ascii')
-    o += (datasize).to_bytes(4, 'little')
-    return o
+# @app.route('/audio')
+# def audio():
+#     """
+#     Stream the audio feed
+#     """
+#     logger = logging.getLogger(__name__)
+
+#     def audio_generator():
+#         """
+#         Generate audio frames
+#         """
+#         while True:
+#             frame = AUDIO_OUTPUT.read_frame()
+#             logger.info('Frame: %s', frame)
+#             if frame is None:
+#                 continue
+#             yield (b'--frame\r\n'
+#                    b'Content-Type: audio/wav\r\n\r\n' + frame + b'\r\n')
+            
+#     return Response(audio_generator(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
 def convert_sound_file(sound_file):
@@ -793,7 +835,7 @@ def convert_sound_file(sound_file):
     rate using wave and pyaudio
     """
     logger = logging.getLogger(__name__)
-    audio = open(MEME_SOUNDS_FOLDER + sound_file, 'rb').read()
+    meme_audio = open(MEME_SOUNDS_FOLDER + sound_file, 'rb').read()
     out_file = MEME_SOUNDS_FOLDER_CONVERTED + sound_file
 
     if os.path.exists(out_file):
@@ -802,11 +844,11 @@ def convert_sound_file(sound_file):
     if not os.path.exists(MEME_SOUNDS_FOLDER_CONVERTED):
         os.makedirs(MEME_SOUNDS_FOLDER_CONVERTED)
 
-    audio = AudioSegment.from_mp3(io.BytesIO(audio))
-    audio = audio.set_frame_rate(AUDIO_RATE)
-    audio = audio.set_channels(1)
-    audio = audio.set_sample_width(2)
-    audio.export(MEME_SOUNDS_FOLDER_CONVERTED + sound_file, format='mp3')
+    meme_audio = AudioSegment.from_mp3(io.BytesIO(meme_audio))
+    meme_audio = meme_audio.set_frame_rate(AUDIO_RATE)
+    meme_audio = meme_audio.set_channels(1)
+    meme_audio = meme_audio.set_sample_width(2)
+    meme_audio.export(MEME_SOUNDS_FOLDER_CONVERTED + sound_file, format='mp3')
     logger.info('Converted %s', sound_file)
     return out_file
 
@@ -821,13 +863,26 @@ def convert_all_sound_files():
         convert_sound_file(sound)
 
 
+# @scheduler.task('date', id='start_audio_stream_startup', next_run_time=datetime.now() + timedelta(seconds=10))
+# def start_audio_stream_startup():
+#     """
+#     Start the audio stream
+#     """
+#     logger = logging.getLogger(__name__)
+#     logger.info('Starting audio stream')
+#     global AUDIO_OUTPUT  # pylint: disable=global-statement
+
+#     AUDIO_OUTPUT = start_audio_stream()
+
+
 # Start the detection tracking job on server startup
-@scheduler.task('date', id='track_detections', next_run_time=datetime.now() + timedelta(seconds=10))
-def track_detections_front():
+@scheduler.task('date', id='track_detections_startup', next_run_time=datetime.now() + timedelta(seconds=10))
+def track_detections_front_startup():
     """
     Track the detections in the front camera feed
     """
     logger = logging.getLogger(__name__)
+    logger.info('Starting detection tracking')
     labels = imx500_get_labels()
     while True:
         largest_object = None
@@ -841,7 +896,7 @@ def track_detections_front():
                 # logger.info(dir(detection))
                 largest_object = detection
                 largest_object_label = label.split(' ')[0]
-        
+
         # logger.info('Largest Object: %s', largest_object_label)
 
         if largest_object is not None and largest_object_label in DETECT_LABELS:
@@ -910,22 +965,22 @@ def meme_sound(sound_id):
     audio1 = pyaudio.PyAudio()
 
     stream = audio1.open(format=pyaudio.paInt16,
-                         # output_device_index=AUDIO_DEVICE_INDEX,
+                         output_device_index=0,
                          channels=1,
                          rate=AUDIO_RATE,
                          frames_per_buffer=AUDIO_CHUNK,
                          output=True)
 
     # Read and process the audio file
-    audio = open(MEME_SOUNDS_FOLDER_CONVERTED + sound, 'rb').read()
-    audio = AudioSegment.from_mp3(io.BytesIO(audio))
-    audio = audio.set_frame_rate(AUDIO_RATE)
-    audio = audio.set_channels(1)
-    audio = audio.set_sample_width(2)
-    audio = audio.normalize()
+    meme_audio = open(MEME_SOUNDS_FOLDER_CONVERTED + sound, 'rb').read()
+    meme_audio = AudioSegment.from_mp3(io.BytesIO(meme_audio))
+    meme_audio = meme_audio.set_frame_rate(AUDIO_RATE)
+    meme_audio = meme_audio.set_channels(1)
+    meme_audio = meme_audio.set_sample_width(2)
+    meme_audio = meme_audio.normalize()
 
     # Convert AudioSegment to raw audio data
-    raw_data = audio.raw_data
+    raw_data = meme_audio.raw_data
 
     # Write raw audio data to the stream in chunks
     for i in range(0, len(raw_data), AUDIO_CHUNK):
@@ -950,17 +1005,17 @@ def random_meme_sound():
         audio1 = pyaudio.PyAudio()
 
         stream = audio1.open(format=pyaudio.paInt16,
-                             output_device_index=AUDIO_DEVICE_INDEX,
+                             output_device_index=0,
                              channels=1,
                              rate=AUDIO_RATE,
                              frames_per_buffer=AUDIO_CHUNK,
                              output=True)
-        audio = open(MEME_SOUNDS_FOLDER_CONVERTED + sound, 'rb').read()
-        audio = AudioSegment.from_mp3(io.BytesIO(audio))
-        audio = audio.set_frame_rate(AUDIO_RATE)
-        audio = audio.set_channels(1)
-        audio = audio.set_sample_width(2)
-        raw_data = audio.raw_data
+        meme_audio = open(MEME_SOUNDS_FOLDER_CONVERTED + sound, 'rb').read()
+        meme_audio = AudioSegment.from_mp3(io.BytesIO(meme_audio))
+        meme_audio = meme_audio.set_frame_rate(AUDIO_RATE)
+        meme_audio = meme_audio.set_channels(1)
+        meme_audio = meme_audio.set_sample_width(2)
+        raw_data = meme_audio.raw_data
         stream.write(raw_data)
         time.sleep(len(raw_data) / (AUDIO_RATE * 2))  # Add delay to ensure audio plays completely
         stream.stop_stream()
@@ -969,10 +1024,186 @@ def random_meme_sound():
         return jsonify({'message': f'Meme Sound Played: {sound}'}), 200
     except Exception as e:  # pylint: disable=broad-except
         pa_device_inf = audio1.get_default_output_device_info()
-        logging.info('Default Output Device Info: %s', pa_device_inf)
-        logging.error('Error: %s while playing %s', e, sound)
-        logging.error(traceback.format_exc())
+        logger.info('Default Output Device Info: %s', pa_device_inf)
+        logger.error('Error: %s while playing %s', e, sound)
+        logger.error(traceback.format_exc())
         return jsonify({'message': f'Error: {e} while playing {sound}'}), 500
+
+
+# audio_output = StreamingOutput()
+
+
+# @app.route('/audio')
+# def audio_feed():
+#     """Stream WAV audio"""
+#     def generate():
+#         FRAMES_PER_CHUNK = 10
+#         SAMPLE_WIDTH = 2  # 16-bit audio
+#         SAMPLE_RATE = 44100
+#         CHANNELS = 1
+        
+#         # Write WAV header
+#         header = (
+#             b'RIFF' +
+#             (36 + SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS).to_bytes(4, 'little') +
+#             b'WAVE' +
+#             b'fmt ' +
+#             (16).to_bytes(4, 'little') +
+#             (1).to_bytes(2, 'little') +
+#             CHANNELS.to_bytes(2, 'little') +
+#             SAMPLE_RATE.to_bytes(4, 'little') +
+#             (SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS).to_bytes(4, 'little') +
+#             (SAMPLE_WIDTH * CHANNELS).to_bytes(2, 'little') +
+#             (SAMPLE_WIDTH * 8).to_bytes(2, 'little') +
+#             b'data' +
+#             (SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS).to_bytes(4, 'little')
+#         )
+#         yield header
+
+#         # Stream audio data
+#         while True:
+#             frames = []
+#             with audio_output.condition:
+#                 for _ in range(FRAMES_PER_CHUNK):
+#                     if not audio_output.frames:
+#                         if not audio_output.condition.wait(timeout=0.1):
+#                             break
+#                     if audio_output.frames:
+#                         frames.append(audio_output.frames.popleft())
+
+#                 if frames:
+#                     chunk = b''.join(frames)
+#                     yield chunk
+
+#     return Response(
+#         generate(),
+#         mimetype='audio/wav',
+#         headers={
+#             'Cache-Control': 'no-cache',
+#             'Connection': 'keep-alive',
+#             'Transfer-Encoding': 'chunked'
+#         }
+#     )
+
+
+# def audio_stream():
+#     """Capture audio feed"""
+#     logger = logging.getLogger(__name__)
+#     p = pyaudio.PyAudio()
+
+#     # Log and find working input device
+#     device_count = p.get_device_count()
+#     logger.info("Found %d audio devices", device_count)
+    
+#     input_device = 1
+
+#     stream = p.open(
+#         format=pyaudio.paInt16,
+#         channels=2,
+#         rate=44100,
+#         input=True,
+#         frames_per_buffer=1024,
+#         input_device_index=input_device
+#     )
+
+#     if not stream.is_active():
+#         raise RuntimeError("Stream failed to start")
+
+#     logger.info("Audio stream started")
+
+#     try:
+#         # start_time = time.time()
+#         # frames_read = 0
+        
+#         GAIN = 2.0
+
+#         while True:
+#             # logger.info('Reading audio frame %d', frames_read)
+#             data = stream.read(2048, exception_on_overflow=False)
+            
+#             # Calculate audio levels
+#             # rms = audioop.rms(data, 2)
+#             # peak = audioop.max(data, 2)
+#             # logger.info('Audio frame %d - RMS: %d, Peak: %d', 
+#             #             frames_read, rms, peak)
+            
+#             # Track timing
+#             # frames_read += 1
+#             # if frames_read % 100 == 0:
+#             #     elapsed = time.time() - start_time
+#             #     fps = frames_read / elapsed
+#             #     logger.info('FPS: %.2f, Total Frames: %d', fps, frames_read)
+            
+#             # audio_output.write_audio(data)
+
+#             # Convert to numpy array for processing
+#             samples = np.frombuffer(data, dtype=np.int16)
+            
+#             # Calculate RMS level
+#             # rms = np.sqrt(np.mean(samples.astype(np.float32)**2))
+#             # if rms > 0:
+#             #     logger.info('Input RMS level: %.2f', rms)
+            
+#             # Apply gain
+#             samples = np.clip(samples * GAIN, -32768, 32767).astype(np.int16)
+            
+#             # Monitor output levels
+#             # output_rms = np.sqrt(np.mean(samples.astype(np.float32)**2))
+#             # if output_rms > 0:
+#             #     logger.info('Output RMS level: %.2f', output_rms)
+            
+#             audio_output.write_audio(samples.tobytes())
+            
+#     except Exception as e:
+#         logger.error('Stream error: %s', str(e))
+#         logger.error('Error details: %s', traceback.format_exc())
+#     finally:
+#         stream.stop_stream()
+#         stream.close() 
+#         p.terminate()
+
+
+def visual_awareness():
+    """
+    Using the cam0 and cam1 feeds, take a snapshot of each feed's frame
+    and send each as a PIL image to the gemini_vision_model for processing
+    """
+    results = [
+        {
+            'front': None,
+            'rear': None
+        }
+    ]
+
+    logger = logging.getLogger(__name__)
+    # Get the front camera feed
+    front_image = FRONT_CAMERA_OUTPUT.read_frame()
+    front_image = Image.open(io.BytesIO(front_image))
+
+    # Get the rear camera feed
+    rear_image = REAR_CAMERA_OUTPUT.read_frame()
+    rear_image = Image.open(io.BytesIO(rear_image))
+
+    # Process the front camera feed
+    front_results = gemini_vision_model.generate_content([gemini_vision_prompt, front_image])
+    logger.info('Front Camera Results: %s', front_results)
+    results[0]['front'] = front_results.text
+
+    # Process the rear camera feed
+    rear_results = gemini_vision_model.generate_content([gemini_vision_prompt, rear_image])
+    logger.info('Rear Camera Results: %s', rear_results)
+    results[0]['rear'] = rear_results.text
+
+    return results
+
+
+@app.route('/api/visual_awareness', methods=['GET', 'POST'])
+def visual_awareness_api():
+    """
+    Visual awareness API endpoint
+    """
+    results = visual_awareness()
+    return results, 200
 
 
 @app.route('/api/health', methods=['GET', 'POST'])
@@ -999,6 +1230,18 @@ if __name__ == '__main__':
     # cam0()
 
     # Start a thread to track the largest object in the front camera feed
-    threading.Thread(target=track_detections_front, daemon=True).start()
+    threading.Thread(target=track_detections_front_startup, daemon=True).start()
+    logging.info('Detection tracking started')
+    # threading.Thread(target=audio_stream, daemon=True).start()
+    # logging.info('Audio stream started')
+
+    # threading.Thread(target=start_audio_stream_startup, daemon=True).start()
+
+    # List all the available audio devices
+    # p = pyaudio.PyAudio()
+    # for i in range(p.get_device_count()):
+    #     dev = p.get_device_info_by_index(i)
+    #     if dev['maxInputChannels'] > 0:
+    #         logging.info('Input Device, index: %s, name: %s', i, dev['name'])
 
     app.run(debug=False, host = '0.0.0.0', port=5000)

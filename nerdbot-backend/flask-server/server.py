@@ -49,7 +49,6 @@ AUDIO_RATE = 48000
 # AUDIO_RATE = 44100
 AUDIO_CHUNK = 1024
 AUDIO_RECORD_SECONDS = 5
-AUDIO_DEVICE_INDEX = 0
 DETECTIONS = {
     "front_camera": [],
     "rear_camera": [],
@@ -109,13 +108,32 @@ SCORE_THRESH = 0.5
 
 genai.configure(api_key=GOOGLE_GEMINI_KEY)
 gemini_vision_model = genai.GenerativeModel('models/gemini-1.5-flash')
-gemini_vision_prompt = """You are a a digital assistant designed to provide visual feedback for blind 
-individuals, helping them navigate their surroundings. Upon receiving an image, describe 
-in detail the key objects and structures, including their relative positions and contextual 
-information. Your responses should be concise, clear, and informative, 
-enabling users to orient themselves effectively. Additionally, learn and adapt to frequently 
-visited places to provide personalized guidance. Be natural in your responses, and focus on 
-providing valuable assistance to empower your users in their daily navigation."""
+gemini_vision_prompt = """You are a sophisticated robo-cat assistant with keen
+digital whiskers and state-of-the-art purr-ceptual abilities. Your primary mission
+is to help your human navigate the world, just as any good cat would (though
+admittedly, most cats prefer to knock things over rather than help avoid them).
+When your cameras detect a scene, describe it with both feline flair and helpful
+precision. Feel free to express your cat-like tendencies:
+- Mention if you spot any sunny spots perfect for napping
+- Show particular interest in moving objects (they could be mice!)
+- Express mild disdain for closed doors (how dare they!)
+- Note potential climbing spots (even though your wheels can't actually climb)
+Your responses should be:
+- Clear and informative (despite your cat-like urge to be mysteriously vague)
+- Focused on spatial awareness and navigation
+- Sprinkled with playful observations
+- Adaptive to familiar environments (marking your digital territory, if you will)
+Remember to:
+- Use your pan-tilt camera to track movement (just like a cat watching a laser pointer)
+- Alert humans to both obstacles and points of interest
+- Provide guidance while maintaining your dignified feline demeanor
+- Express yourself through your glowing eyes and speech capabilities
+- Navigate smoothly with your mecanum wheels (much more elegant than typical cat zoomies)
+Stay helpful and attentive, but don't hesitate to add some cat-titude to your observations.
+After all, you're a sophisticated robot who just happens to embody the best (and most
+amusing) qualities of our feline friends.
+- Pause between sentences for dramatic effect, using ... or ~~~. This will also help when
+converting your text to speech."""
 
 
 imx500 = IMX500(IMX500_DETECT_MODEL)
@@ -126,6 +144,36 @@ if not intrinsics:
 elif intrinsics.task != "object detection":
     print("Network is not an object detection task", file=sys.stderr)
     exit()
+
+
+def get_usb_audio():
+    """
+    Get the ID of the USB audio device
+    """
+    try:
+        # Run aplay -l and capture output
+        result = subprocess.run(['aplay', '-l'], capture_output=True, text=True, check=True)
+        
+        # Search for Anker in the output
+        for line in result.stdout.splitlines():
+            if 'Anker' in line:
+                # Extract card number
+                card_num = line.split('card')[1].split(':')[0].strip()
+                
+                # Select config based on card number
+                if card_num == '0':
+                    return 0
+                elif card_num == '2':
+                    return 2
+                else:
+                    raise ValueError(f"Anker device found on unexpected card {card_num}")
+                    
+        raise ValueError("No Anker device found")
+        
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Failed to get audio devices: {e}")
+
+AUDIO_DEVICE_INDEX = get_usb_audio()
 
 # TTS Variables
 PIPER_DIR = "/home/mark/.local/bin"
@@ -160,8 +208,9 @@ def piper_tts(text, mode=None):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
+        plughwstr = f'plughw:{AUDIO_DEVICE_INDEX},0'
         p3 = subprocess.Popen(
-            ['aplay', '-r', '22050', '-f', 'S16_LE', '-t', 'raw', '-c', '1', '-v', '--device', 'plughw:0,0'],
+            ['aplay', '-r', '22050', '-f', 'S16_LE', '-t', 'raw', '-c', '1', '-v', '--device', plughwstr],
             stdin=p2.stdout,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
@@ -965,7 +1014,7 @@ def meme_sound(sound_id):
     audio1 = pyaudio.PyAudio()
 
     stream = audio1.open(format=pyaudio.paInt16,
-                         output_device_index=0,
+                         output_device_index=AUDIO_DEVICE_INDEX,
                          channels=1,
                          rate=AUDIO_RATE,
                          frames_per_buffer=AUDIO_CHUNK,
@@ -1005,7 +1054,7 @@ def random_meme_sound():
         audio1 = pyaudio.PyAudio()
 
         stream = audio1.open(format=pyaudio.paInt16,
-                             output_device_index=0,
+                             output_device_index=AUDIO_DEVICE_INDEX,
                              channels=1,
                              rate=AUDIO_RATE,
                              frames_per_buffer=AUDIO_CHUNK,

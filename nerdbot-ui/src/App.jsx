@@ -1,11 +1,15 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import './App.css'
+import axios from 'axios';
 
 function App() {
   const [message, setMessage] = useState('');
+  const [isVideoFeedActive, setIsVideoFeedActive] = useState(false);
   const frontCamera = 'http://10.0.1.204:5000/cam0'
   const rearCamera = 'http://10.0.1.204:5000/cam1'
-  const audioStream = 'http://10.0.1.204:5000/audio'
+  const visualDescriptionEndpoint = 'http://10.0.1.204:5000/api/visual_awareness'
+  const audioStream = 'http://10.0.1.204:8000/Stream.mp3'
+  const [visualDescription, setVisualDescription] = useState(null);
 
   const cameras = [
     {
@@ -135,12 +139,79 @@ function App() {
       console.error('Error:', error);
     }
   }
+
+  const handleKeyDown = (e) => {
+    if (!isVideoFeedActive) return;
+
+    switch (e.key) {
+      case 'w':
+        handleMotorControl('forward');
+        break;
+      case 'a':
+        handleMotorControl('strafe_left');
+        break;
+      case 's':
+        handleMotorControl('backward');
+        break;
+      case 'd':
+        handleMotorControl('strafe_right');
+        break;
+      case 'q':
+        handleMotorControl('left');
+        break;
+      case 'e':
+        handleMotorControl('right');
+        break;
+      default:
+        break;
+    }
+  };
+
+  const handleKeyUp = (e) => {
+    if (!isVideoFeedActive) return;
+
+    // Stop motor control when key is released
+    handleMotorControl('stop');
+  };
+
+  useEffect(() => {
+    if (isVideoFeedActive) {
+      window.addEventListener('keydown', handleKeyDown);
+      window.addEventListener('keyup', handleKeyUp);
+    } else {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    }
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [isVideoFeedActive]);
+
+  useEffect(() => {
+    const fetchVisualDescription = async () => {
+      try {
+        const response = await axios.get(visualDescriptionEndpoint);
+        setVisualDescription(response.data[0]);
+      } catch (error) {
+        console.error('Error fetching visual description:', error);
+      }
+    };
+
+    fetchVisualDescription();
+  }, []);
+
   return (
     <>
       <h1>nerdbot</h1>
       <div className="card">
         <div className="cameras">
-          <div className="video-container">
+          <div
+            className="video-container"
+            onMouseEnter={() => setIsVideoFeedActive(true)}
+            onMouseLeave={() => setIsVideoFeedActive(false)}
+          >
             <div className="video-feed">
               <img src={frontCamera} alt="Front Camera" />
               <div className="pip">
@@ -157,7 +228,7 @@ function App() {
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
                 onKeyPress={handleKeyPress}
-                placeholder="Enter your message..."
+                placeholder="Enter your message - It will be spoken by the robot"
                 className="message-input"
               />
               <button onClick={handleSendMessage}>Send</button>
@@ -166,6 +237,7 @@ function App() {
         </div>
 
         <div className="controls">
+        <em>mouse-over the video to enable keyboard controls</em>
           <div className="motor-grid-container">
             <button class="disable-dbl-tap-zoom" onClick={() => handleMotorControl('forward')}>Forward</button>
             <button class="disable-dbl-tap-zoom" onClick={() => handleMotorControl('left')}>Left</button>
@@ -187,6 +259,22 @@ function App() {
           </audio>
           <button class="disable-dbl-tap-zoom" onClick={handleRandomMemAudio}>Random Meme Sound</button>
         </div>
+        {visualDescription ? (
+            <div className="visual-description">
+                <div>
+                <h3>Front</h3>
+                <p>{visualDescription.front}</p>
+                </div>
+                <div>
+                <h3>Rear</h3>
+                <p>{visualDescription.rear}</p>
+                </div>
+            </div>
+            ) : (
+            <div className="visual-description">
+                <p>Loading...</p>
+            </div>
+            )}
       </div>
     </>
   )

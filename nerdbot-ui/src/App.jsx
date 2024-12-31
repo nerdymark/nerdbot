@@ -108,23 +108,23 @@ function App() {
     }
   }
 
-  const handleSendMessage = async () => {
+  const handleSendMessage = async (messageObj) => {
     console.log('handleSendMessage called');
-    console.log('Message:', message);
+    console.log('Message:', messageObj.content);
   
-    if (message.trim() === '') {
+    if (messageObj.content.trim() === '') {
       console.log('Message is empty, returning');
       return;
     }
   
     try {
-      console.log('Sending POST request to http://10.0.1.204:5000/api/tts/' + encodeURIComponent(message));
-      const response = await fetch('http://10.0.1.204:5000/api/tts/' + encodeURIComponent(message), {
+      console.log('Sending POST request to http://10.0.1.204:5000/api/tts/' + encodeURIComponent(messageObj.content));
+      const response = await fetch('http://10.0.1.204:5000/api/tts/' + encodeURIComponent(messageObj.content), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({ message: messageObj.content }),
       });
   
       console.log('Response status:', response.status);
@@ -231,7 +231,7 @@ function App() {
                 placeholder="Enter your message - It will be spoken by the robot"
                 className="message-input"
               />
-              <button onClick={handleSendMessage}>Send</button>
+              <button onClick={() => handleSendMessage({ type: "tts", content: message })}>Send</button>
             </div>
           </div>
         </div>
@@ -264,10 +264,28 @@ function App() {
                 <div>
                 <h3>Front</h3>
                 <p>{visualDescription.front}</p>
+                <button 
+                    className="tts-button"
+                    onClick={() => handleSendMessage({
+                        type: "tts",
+                        content: visualDescription.front
+                    })}
+                >
+                    🔊 Play
+                </button>
                 </div>
                 <div>
                 <h3>Rear</h3>
                 <p>{visualDescription.rear}</p>
+                <button 
+                    className="tts-button"
+                    onClick={() => handleSendMessage({
+                        type: "tts", 
+                        content: visualDescription.rear
+                    })}
+                >
+                    🔊 Play
+                </button>
                 </div>
             </div>
             ) : (

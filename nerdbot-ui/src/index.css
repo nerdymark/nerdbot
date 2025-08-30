@@ -1,0 +1,200 @@
+:root {
+  /* Typography */
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  /* Colors - Dark Theme Primary */
+  --bg-primary: #1a1a1a;
+  --bg-secondary: #2a2a2a;
+  --bg-tertiary: #242424;
+  --text-primary: rgba(255, 255, 255, 0.87);
+  --text-secondary: #888;
+  --text-muted: #666;
+  
+  /* Brand Colors */
+  --primary-color: #4a90e2;
+  --primary-hover: #357abd;
+  --accent-blue: #646cff;
+  --accent-blue-hover: #535bf2;
+  --react-shadow: #61dafbaa;
+  
+  /* Status Colors */
+  --success: #44ff44;
+  --warning: #ffaa44;
+  --error: #ff4444;
+  
+  /* Spacing Scale */
+  --space-xs: 0.25rem;
+  --space-sm: 0.5rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2rem;
+  --space-2xl: 3rem;
+  
+  /* Layout */
+  --border-radius: 0.5rem;
+  --border-radius-sm: 0.25rem;
+  --container-width: 800px;
+  --container-padding: var(--space-md);
+  
+  /* Transitions */
+  --transition-fast: 150ms ease;
+  --transition-normal: 300ms ease;
+  --transition-slow: 500ms ease;
+  
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.1);
+  --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.15);
+  --shadow-lg: 0 4px 8px rgba(0, 0, 0, 0.2);
+  
+  /* Typography Scale */
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+  --text-3xl: 2rem;
+}
+
+/* Reset and Base Styles */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.5;
+  min-height: 100vh;
+  font-size: var(--text-base);
+}
+
+/* Typography */
+h1 {
+  font-size: var(--text-3xl);
+  line-height: 1.1;
+  margin: var(--space-lg) 0;
+  font-weight: 600;
+}
+
+h2 {
+  font-size: var(--text-2xl);
+  margin: var(--space-md) 0;
+  font-weight: 500;
+}
+
+h3 {
+  font-size: var(--text-xl);
+  margin: var(--space-md) 0;
+  font-weight: 500;
+}
+
+p {
+  margin: var(--space-sm) 0;
+  line-height: 1.6;
+}
+
+/* Links */
+a {
+  font-weight: 500;
+  color: var(--accent-blue);
+  text-decoration: none;
+  transition: color var(--transition-fast);
+}
+
+a:hover {
+  color: var(--accent-blue-hover);
+}
+
+/* Base Button Styles */
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+  font-size: var(--text-base);
+  font-weight: 500;
+  font-family: inherit;
+  border: none;
+  border-radius: var(--border-radius);
+  background-color: var(--primary-color);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  touch-action: manipulation;
+  user-select: none;
+  min-height: 44px;
+}
+
+button:hover:not(:disabled) {
+  background-color: var(--primary-hover);
+  transform: translateY(-1px);
+}
+
+button:active {
+  transform: translateY(0);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
+}
+
+/* Input Styles */
+input[type="text"] {
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  font-size: var(--text-base);
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--text-muted);
+  border-radius: var(--border-radius);
+  transition: border-color var(--transition-fast);
+}
+
+input[type="text"]:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  :root {
+    --container-padding: var(--space-sm);
+    --text-3xl: 1.75rem;
+    --text-2xl: 1.25rem;
+  }
+  
+  body {
+    font-size: var(--text-sm);
+  }
+  
+  button {
+    min-height: 48px;
+    padding: var(--space-md);
+  }
+}
+
+@media (max-width: 480px) {
+  :root {
+    --space-md: 0.75rem;
+    --space-lg: 1rem;
+  }
+  
+  h1 {
+    font-size: var(--text-2xl);
+  }
+}

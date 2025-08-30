@@ -1,0 +1,19 @@
+[Unit]
+Description=NerdBot React UI Development Server
+Documentation=file:///home/mark/nerdbot-ui
+After=network.target
+
+[Service]
+Type=simple
+User=mark
+Group=mark
+WorkingDirectory=/home/mark/nerdbot-ui
+Environment=PATH=/home/mark/.local/bin:/home/mark/.nvm/versions/node/v20.17.0/bin:/home/mark/.cargo/bin:/home/mark/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/games:/usr/games
+ExecStart=/usr/bin/npm run dev -- --host
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/mark/nerdbot-ui.log
+StandardError=append:/home/mark/nerdbot-ui.log
+
+[Install]
+WantedBy=multi-user.target

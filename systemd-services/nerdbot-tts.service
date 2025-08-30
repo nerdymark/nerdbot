@@ -1,0 +1,25 @@
+[Unit]
+Description=NerdBot Text-to-Speech Server
+Documentation=file:///home/mark/TTS
+After=network.target sound.target nerdbot-flask.service
+Wants=nerdbot-flask.service
+
+[Service]
+Type=simple
+User=mark
+Group=mark
+WorkingDirectory=/home/mark/nerdbot-backend
+Environment=PATH=/home/mark/.local/bin:/home/mark/.nvm/versions/node/v20.17.0/bin:/home/mark/.cargo/bin:/home/mark/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/games:/usr/games
+ExecStartPre=/bin/bash -c 'if aplay -l | grep -q Anker; then CARD_NUM=$(aplay -l | grep Anker | sed -n "s/card \\([0-9]\\):.*/\\1/p"); if [ -n "$CARD_NUM" ]; then amixer -c $CARD_NUM cset numid=3 95 2>/dev/null; fi; fi; amixer sset Master 75%% 2>/dev/null || amixer sset PCM 75%% 2>/dev/null'
+ExecStartPre=/bin/sleep 30
+ExecStart=/bin/bash -c 'source setup_env.sh && python -m TTS.server.server --model_name tts_models/en/ljspeech/speedy-speech'
+Restart=always
+RestartSec=30
+StandardOutput=append:/home/mark/nerdbot-tts.log
+StandardError=append:/home/mark/nerdbot-tts.log
+
+# Allow access to audio devices
+SupplementaryGroups=audio
+
+[Install]
+WantedBy=multi-user.target

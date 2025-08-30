@@ -1,0 +1,23 @@
+[Unit]
+Description=NerdBot Integrated Joystick Control Service
+Documentation=file:///home/mark/nerdbot-backend/integrated_joystick_service.py
+After=nerdbot-flask.service
+Wants=nerdbot-flask.service
+
+[Service]
+Type=simple
+User=mark
+Group=mark
+WorkingDirectory=/home/mark/nerdbot-backend
+Environment=PATH=/home/mark/.local/bin:/home/mark/.nvm/versions/node/v20.17.0/bin:/home/mark/.cargo/bin:/home/mark/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/games:/usr/games
+ExecStart=/bin/bash -c 'source setup_env.sh && python integrated_joystick_service.py'
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/mark/nerdbot-joystick.log
+StandardError=append:/home/mark/nerdbot-joystick.log
+
+# Allow access to input devices and GPIO
+SupplementaryGroups=input gpio spi i2c
+
+[Install]
+WantedBy=multi-user.target

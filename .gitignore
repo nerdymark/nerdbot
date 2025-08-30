@@ -1,0 +1,131 @@
+# NerdBot Project .gitignore
+# Only include project-specific directories and files
+
+# System and user files to ignore
+.*
+!.gitignore
+!.profile
+!.bashrc
+
+# Temporary and log files
+*.log
+*.tmp
+nerdbot-joystick.log
+nerdbot.log
+flask_debug.log
+hailort.log
+*.deb
+*.whl
+
+# User directories to ignore
+Desktop/
+Documents/
+Downloads/
+Music/
+Pictures/
+Public/
+Templates/
+Videos/
+Bookshelf/
+
+# System directories to ignore
+DEBIAN/
+
+# Cache and config directories
+.cache/
+.config/
+.cups/
+.dotnet/
+.hailo/
+.ipython/
+.jupyter/
+.local/
+.npm/
+.nvm/
+.pki/
+.rustup/
+.ssh/
+.vnc/
+.vscode-server/
+.venv/
+
+# Claude Code configuration (contains API keys)
+.claude/
+.claude.json
+.claude.json.backup
+
+# API Keys and sensitive configuration
+*.env
+.env*
+**/config.json
+**/.credentials.json
+**/credentials.json
+**/*credentials*
+**/*api_key*
+**/*secret*
+nerdbot-scripts/config.json
+
+# Package files
+node_modules/
+package.json
+package-lock.json
+
+# Model files and directories (too large for git)
+*.onnx
+*.onnx.json
+*.hef
+hailo_model_zoo/
+
+# Audio files
+*.wav
+*.mp3
+
+# History files
+.bash_history*
+.lesshst
+.python_history
+.selected_editor
+.wget-hsts
+.Xauthority
+.xsession-errors*
+
+# Other system files
+.sudo_as_admin_successful
+
+# Build artifacts
+build/
+build.*/
+dist/
+__pycache__/
+*.pyc
+*.pyo
+*.o
+*.so
+*.a
+*.tar.gz
+darkice/darkice-1.5/src/darkice
+darkice/darkice-1.5/src/darkice-*
+darkice/darkice-1.5/src/stamp-h1
+darkice/darkice-1.5/config.status
+darkice/darkice-1.5/Makefile
+darkice/darkice-1.5/src/Makefile
+darkice/darkice-1.5/man/Makefile
+darkice/darkice-1.5/src/config.h
+
+# IDE files
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Only include these project directories
+# Everything else will be ignored by default

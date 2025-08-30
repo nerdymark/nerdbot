@@ -1,0 +1,25 @@
+[Unit]
+Description=NerdBot Fan Control Service
+Documentation=file:///home/mark/nerdbot-scripts/fan-control.py
+After=multi-user.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/mark/nerdbot-scripts
+ExecStart=/usr/bin/python3 /home/mark/nerdbot-scripts/fan-control.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security settings
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/sys/class/thermal/cooling_device0
+ReadOnlyPaths=/sys/devices/virtual/thermal/thermal_zone0
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

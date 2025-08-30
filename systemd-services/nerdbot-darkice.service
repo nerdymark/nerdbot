@@ -1,0 +1,22 @@
+[Unit]
+Description=NerdBot DarkIce Audio Streaming Service
+Documentation=file:///home/mark/darkice
+After=sound.target nerdbot-flask.service
+Wants=nerdbot-flask.service
+
+[Service]
+Type=simple
+User=mark
+Group=mark
+WorkingDirectory=/home/mark/darkice
+ExecStart=/home/mark/nerdbot-scripts/darkice-startup.sh
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/mark/nerdbot-darkice.log
+StandardError=append:/home/mark/nerdbot-darkice.log
+
+# Allow access to audio devices
+SupplementaryGroups=audio
+
+[Install]
+WantedBy=multi-user.target

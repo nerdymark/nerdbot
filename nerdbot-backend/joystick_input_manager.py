@@ -93,6 +93,15 @@ class JoystickInputManager:
         self.last_input_time[input_key] = current_time
         return True
     
+    def _toggle_headlights(self):
+        """Toggle headlights functionality"""
+        try:
+            from light_bar.light_bar import light_bar
+            result = light_bar.toggle_headlights()
+            self.logger.info(f"Headlights toggled: {result}")
+        except Exception as e:
+            self.logger.error(f"Failed to toggle headlights: {e}")
+    
     def _handle_dpad_input(self, dpad_x: float, dpad_y: float):
         """Handle D-pad input for movement controls"""
         # Note: D-pad is currently disabled in original code due to Steam Controller mapping issues
@@ -175,15 +184,23 @@ class JoystickInputManager:
         if not pressed:  # Only handle button press, not release
             return
             
+        # Debug logging to identify button IDs
+        self.logger.info(f"Button pressed: ID {button_id}")
+            
         # Steam Controller specific button mappings
         if button_id == 0:  # A button - center servos
             self._notify_servo_subscribers('center')
-        elif button_id == 1:  # B button - stop motors
-            self._notify_motor_subscribers('stop')
+        elif button_id == 1:  # Button ID 1 - reserved for future use
+            pass
         elif button_id == 2:  # X button - reserved for future use
             pass
-        elif button_id == 3:  # Y button - reserved for future use
+        elif button_id == 3:  # B button - emergency stop motors
+            self._notify_motor_subscribers('stop')
+        elif button_id == 6:  # Back/Menu button (left of Steam button) - reserved for future use
             pass
+        elif button_id == 10:  # Button left of Menu button - toggle headlights
+            self._toggle_headlights()
+        # Additional buttons could be mapped here (4=LB, 5=RB, 7=Start, etc.)
     
     def _handle_trigger_input(self, left_trigger: float, right_trigger: float):
         """Handle trigger input for rotation"""

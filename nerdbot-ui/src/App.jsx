@@ -7,6 +7,7 @@ function App() {
   const [message, setMessage] = useState('');
   const [isVideoFeedActive, setIsVideoFeedActive] = useState(false);
   const [currentMode, setCurrentMode] = useState(null);
+  const [headlightsOn, setHeadlightsOn] = useState(false);
   const frontCamera = 'http://10.0.1.204:5000/cam0'
   const rearCamera = 'http://10.0.1.204:5000/cam1'
   const visualDescriptionEndpoint = 'http://10.0.1.204:5000/api/visual_awareness'
@@ -106,6 +107,27 @@ function App() {
       );
     }
 
+  }
+
+  const handleHeadlightToggle = async () => {
+    try {
+      const response = await fetch('http://10.0.1.204:5000/api/headlights/toggle', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        setHeadlightsOn(data.headlights_on);
+        console.log('Headlights toggled:', data.headlights_on);
+      } else {
+        console.error('Failed to toggle headlights');
+      }
+    } catch (error) {
+      console.error('Error toggling headlights:', error);
+    }
   }
   
   const handleModeChange = async (mode) => {
@@ -237,6 +259,22 @@ function App() {
     
     // Cleanup
     return () => clearInterval(intervalId);
+  }, []);
+
+  useEffect(() => {
+    const fetchHeadlightStatus = async () => {
+      try {
+        const response = await fetch('http://10.0.1.204:5000/api/headlights/status');
+        if (response.ok) {
+          const data = await response.json();
+          setHeadlightsOn(data.headlights_on);
+        }
+      } catch (error) {
+        console.error('Error fetching headlight status:', error);
+      }
+    };
+
+    fetchHeadlightStatus();
   }, []);
 
   useEffect(() => {
@@ -390,6 +428,21 @@ function App() {
             <source src={audioStream} type="audio/x-wav;codec=pcm"/>
           </audio>
           <button onClick={handleRandomMemAudio}>Random Meme Sound</button>
+          <button 
+            onClick={handleHeadlightToggle}
+            className={`headlight-button ${headlightsOn ? 'active' : ''}`}
+            style={{
+              backgroundColor: headlightsOn ? '#fff' : '#333',
+              color: headlightsOn ? '#000' : '#fff',
+              border: '2px solid #fff',
+              padding: '10px 20px',
+              borderRadius: '5px',
+              cursor: 'pointer',
+              fontWeight: 'bold'
+            }}
+          >
+            💡 Headlights {headlightsOn ? 'ON' : 'OFF'}
+          </button>
         </div>
 
         {/* System Vitals Card */}

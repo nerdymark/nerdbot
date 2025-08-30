@@ -86,6 +86,16 @@ scheduler.start()
 try:
     if light_bar.start():
         logging.info("Light bar initialized successfully")
+        # Show startup sequence with brightness control
+        light_bar.set_robot_state("startup")
+        time.sleep(2)
+        # Dim startup effect before going to idle
+        try:
+            light_bar.controller.controller.dim_to_normal()
+            time.sleep(0.5)
+        except:
+            pass
+        light_bar.set_robot_state("idle")
     else:
         logging.warning("Failed to initialize light bar")
 except Exception as e:
@@ -251,6 +261,12 @@ def piper_tts(text):
     text_regex = re.compile(r'[^A-Za-z0-9\s\.,\'\"\-\?\!]+')
     text = text_regex.sub('', text)
     logger.info("TTS Text: %s", text)
+    
+    # Set light bar to speaking state
+    try:
+        light_bar.set_robot_state("speaking")
+    except Exception as e:
+        logger.warning(f"Light bar speaking effect failed: {e}")
 
     sentence_sleep = 0.5
     all_sentences = [s for s in text.split('.') if s.strip()]
@@ -325,6 +341,12 @@ def piper_tts(text):
                     logger.error("Error killing process: %s", ke)
             raise
 
+    # Return to idle state after speaking
+    try:
+        light_bar.set_robot_state("idle")
+    except Exception as e:
+        logger.warning(f"Light bar idle effect failed: {e}")
+    
     return "Text to Speech Complete"
 
 
@@ -596,6 +618,15 @@ def run_detection_camera_0_imx500():
                     }
                     # Update mode manager with latest detection
                     mode_manager.update_detection(last_results)
+                    # Set light bar to detection state if objects detected
+                    if last_results:
+                        try:
+                            light_bar.set_robot_state("detection")
+                            # Dim to normal brightness after 1 second, return to idle after 3 seconds
+                            threading.Timer(1.0, lambda: light_bar.controller.controller.dim_to_normal() if hasattr(light_bar.controller, 'controller') else None).start()
+                            threading.Timer(3.0, lambda: light_bar.set_robot_state("idle")).start()
+                        except Exception as e:
+                            logger.warning(f"Light bar detection effect failed: {e}")
                     # for detection in last_results:
                     #     # What are the detections and their bounding boxes?
                     #     logger.info("Bounding Box: %s", detection.box)
@@ -657,6 +688,15 @@ def run_detection_camera_0_hailo(model, labels, score_thresh):
                             }
                             # Update mode manager with latest detection
                             mode_manager.update_detection(detections)
+                            # Set light bar to detection state if objects detected
+                            if detections:
+                                try:
+                                    light_bar.set_robot_state("detection")
+                                    # Dim to normal brightness after 1 second, return to idle after 3 seconds
+                                    threading.Timer(1.0, lambda: light_bar.controller.controller.dim_to_normal() if hasattr(light_bar.controller, 'controller') else None).start()
+                                    threading.Timer(3.0, lambda: light_bar.set_robot_state("idle")).start()
+                                except Exception as e:
+                                    logger.warning(f"Light bar detection effect failed: {e}")
 
                             # logger.info('DETECTIONS: %s', DETECTIONS)
 
@@ -832,6 +872,13 @@ def motor_control(direction):
     """
     Control the motors in the specified direction
     """
+    # Set light bar to moving state when motors are active
+    if direction != 'stop':
+        try:
+            light_bar.set_robot_state("moving")
+        except Exception as e:
+            logging.warning(f"Light bar moving effect failed: {e}")
+    
     if direction == 'forward':
         # text_to_speech("Moving Forward")
         motors.move_forward(0.75)
@@ -871,6 +918,11 @@ def motor_control(direction):
     elif direction == 'stop':
         # text_to_speech("Stopping")
         motors.stop()
+        # Return to idle when stopped
+        try:
+            light_bar.set_robot_state("idle")
+        except Exception as e:
+            logging.warning(f"Light bar idle effect failed: {e}")
 
     return jsonify({'message': 'Motor Control Complete'}), 200
 
@@ -928,6 +980,59 @@ def tts(text):
     """
     result = piper_tts(text)
     return jsonify({'message': result}), 200  # Return JSON response with HTTP 200 status
+
+
+@app.route('/api/headlights/toggle', methods=['GET', 'POST'])
+def toggle_headlights():
+    """
+    Toggle headlights on/off
+    """
+    try:
+        result = light_bar.toggle_headlights()
+        status = "on" if light_bar.is_headlights_active() else "off"
+        return jsonify({'message': f'Headlights toggled {status}', 'headlights_on': light_bar.is_headlights_active()}), 200
+    except Exception as e:
+        logging.error(f"Headlights toggle error: {e}")
+        return jsonify({'error': 'Failed to toggle headlights'}), 500
+
+
+@app.route('/api/headlights/status', methods=['GET'])
+def headlights_status():
+    """
+    Get current headlights status
+    """
+    try:
+        status = light_bar.is_headlights_active()
+        return jsonify({'headlights_on': status}), 200
+    except Exception as e:
+        logging.error(f"Headlights status error: {e}")
+        return jsonify({'error': 'Failed to get headlights status'}), 500
+
+
+@app.route('/api/headlights/on', methods=['POST'])
+def headlights_on():
+    """
+    Turn headlights on
+    """
+    try:
+        result = light_bar.headlights_on()
+        return jsonify({'message': 'Headlights turned on', 'success': result}), 200
+    except Exception as e:
+        logging.error(f"Headlights on error: {e}")
+        return jsonify({'error': 'Failed to turn on headlights'}), 500
+
+
+@app.route('/api/headlights/off', methods=['POST'])
+def headlights_off():
+    """
+    Turn headlights off
+    """
+    try:
+        result = light_bar.headlights_off()
+        return jsonify({'message': 'Headlights turned off', 'success': result}), 200
+    except Exception as e:
+        logging.error(f"Headlights off error: {e}")
+        return jsonify({'error': 'Failed to turn off headlights'}), 500
 
 
 @app.route('/api/vitals', methods=['GET', 'POST'])
@@ -1339,6 +1444,12 @@ def meme_sound(sound_id):
         return jsonify({'message': 'Invalid sound_id'}), 400
 
     sound = MEME_SOUNDS[sound_id]
+    
+    # Set light bar to audio reactive mode
+    try:
+        light_bar.audio_reactive(0.7)  # Medium-high intensity for memes
+    except Exception as e:
+        logging.warning(f"Light bar audio effect failed: {e}")
 
     audio1 = pyaudio.PyAudio()
 
@@ -1366,6 +1477,13 @@ def meme_sound(sound_id):
 
     stream.stop_stream()
     stream.close()
+    
+    # Return to idle after playing sound
+    try:
+        light_bar.set_robot_state("idle")
+    except Exception as e:
+        logging.warning(f"Light bar idle effect failed: {e}")
+    
     return jsonify({'message': 'Meme Sound Played'}), 200
 
 
@@ -1379,6 +1497,13 @@ def random_meme_sound():
     sound_id = randint(0, len(MEME_SOUNDS) - 1)
     sound = MEME_SOUNDS[sound_id]
     logger.info('Playing %s', sound)
+    
+    # Set light bar to celebration mode for random sounds
+    try:
+        light_bar.celebration()
+    except Exception as e:
+        logger.warning(f"Light bar celebration effect failed: {e}")
+    
     try:
         audio1 = pyaudio.PyAudio()
 
@@ -1399,6 +1524,13 @@ def random_meme_sound():
         stream.stop_stream()
         stream.close()
         audio1.terminate()  # Ensure resources are released
+        
+        # Return to idle after playing sound
+        try:
+            light_bar.set_robot_state("idle")
+        except Exception as e:
+            logger.warning(f"Light bar idle effect failed: {e}")
+        
         return jsonify({'message': f'Meme Sound Played: {sound}'}), 200
     except Exception as e:  # pylint: disable=broad-except
         pa_device_inf = audio1.get_default_output_device_info()

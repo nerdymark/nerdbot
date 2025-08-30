@@ -42,13 +42,19 @@ import threading
 import logging
 import glob
 from typing import Optional
+try:
+    from light_bar.wled_controller import wled_controller, RobotState
+    WLED_AVAILABLE = True
+except ImportError:
+    WLED_AVAILABLE = False
+    print("WLED controller not available, using USB CDC mode")
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class LightBarController:
+class USBCDCLightBarController:
     """Controller for USB CDC connected LED light bar."""
     
     def __init__(self, device_path: Optional[str] = None, baudrate: int = 115200, timeout: float = 1.0):
@@ -238,57 +244,266 @@ class LightBarController:
             logger.error("Invalid pixel count: %d. Must be between 1 and 8.", n)
             return False
         return self.send_command(f"pixels {n}")
+
+
+class LightBarController:
+    """Unified controller that uses WLED if available, otherwise USB CDC."""
+    
+    def __init__(self, use_wled: bool = True, device_path: Optional[str] = None):
+        """
+        Initialize the light bar controller.
+        
+        Args:
+            use_wled: Use WLED controller if available
+            device_path: USB CDC device path (only used if not using WLED)
+        """
+        self.use_wled = use_wled and WLED_AVAILABLE
+        
+        if self.use_wled:
+            self.controller = wled_controller
+            logger.info("Using WLED controller")
+        else:
+            self.controller = USBCDCLightBarController(device_path)
+            logger.info("Using USB CDC controller")
+            
+        self._connected = False
+    
+    def connect(self) -> bool:
+        """Connect to the light bar."""
+        if self.use_wled:
+            # WLED is always "connected" via HTTP
+            info = self.controller.get_info()
+            if info:
+                self._connected = True
+                logger.info(f"Connected to WLED with {info['leds']['count']} LEDs")
+                # Set initial state
+                self.controller.startup()
+                time.sleep(2)
+                self.controller.idle()
+                return True
+            return False
+        else:
+            self._connected = self.controller.connect()
+            return self._connected
+    
+    def disconnect(self):
+        """Disconnect from the light bar."""
+        if self.use_wled:
+            self.controller.shutdown()
+            time.sleep(2)
+            self.controller.turn_off()
+        else:
+            self.controller.disconnect()
+        self._connected = False
+    
+    def is_connected(self) -> bool:
+        """Check if connected."""
+        if self.use_wled:
+            return self._connected
+        else:
+            return self.controller.is_connected()
+    
+    # Unified command methods that work with both controllers
+    def send_command(self, command: str) -> bool:
+        """Send a command (USB CDC mode) or map to WLED effect."""
+        if self.use_wled:
+            # Map USB CDC commands to WLED effects
+            command_map = {
+                "rainbow": lambda: self.controller.rainbow(),
+                "knight_red": lambda: self.controller.moving(),
+                "speech": lambda: self.controller.speaking(),
+                "idle": lambda: self.controller.idle(),
+                "waterfall": lambda: self.controller.set_effect("waterfall", 100, 150),
+                "clear": lambda: self.controller.turn_off(),
+                "off": lambda: self.controller.turn_off(),
+                "demo": lambda: self.controller.celebration(),
+                "white": lambda: self.controller.set_color(255, 255, 255),
+                "red": lambda: self.controller.set_color(255, 0, 0),
+                "green": lambda: self.controller.set_color(0, 255, 0),
+                "blue": lambda: self.controller.set_color(0, 0, 255),
+                "test": lambda: self.controller.startup()
+            }
+            
+            if command in command_map:
+                return command_map[command]()
+            else:
+                logger.warning(f"Unknown command for WLED: {command}")
+                return False
+        else:
+            return self.controller.send_command(command)
+    
+    # New methods for robot state management (WLED only)
+    def set_robot_state(self, state: str) -> bool:
+        """Set robot state for light effects."""
+        if self.use_wled:
+            try:
+                robot_state = RobotState(state)
+                return self.controller.set_robot_state(robot_state)
+            except ValueError:
+                logger.error(f"Invalid robot state: {state}")
+                return False
+        else:
+            # Map states to USB CDC commands
+            state_map = {
+                "idle": "idle",
+                "moving": "knight_red",
+                "speaking": "speech",
+                "listening": "waterfall",
+                "detection": "rainbow",
+                "thinking": "waterfall",
+                "error": "red",
+                "startup": "test",
+                "shutdown": "off"
+            }
+            return self.send_command(state_map.get(state, "idle"))
+    
+    # Pass through methods
+    def rainbow(self) -> bool:
+        return self.send_command("rainbow")
+    
+    def red_knight_rider(self) -> bool:
+        return self.send_command("knight_red")
+    
+    def knight_red(self) -> bool:
+        return self.send_command("knight_red")
+    
+    def speech_animation(self) -> bool:
+        return self.send_command("speech")
+    
+    def idle_animation(self) -> bool:
+        return self.send_command("idle")
+    
+    def waterfall_animation(self) -> bool:
+        return self.send_command("waterfall")
+    
+    def clear(self) -> bool:
+        return self.send_command("clear")
+    
+    def demo(self) -> bool:
+        return self.send_command("demo")
+    
+    def white(self) -> bool:
+        return self.send_command("white")
+    
+    def red(self) -> bool:
+        return self.send_command("red")
+    
+    def green(self) -> bool:
+        return self.send_command("green")
+    
+    def blue(self) -> bool:
+        return self.send_command("blue")
+    
+    def off(self) -> bool:
+        return self.send_command("off")
+    
+    def test(self) -> bool:
+        return self.send_command("test")
+    
+    # WLED-specific methods
+    def audio_reactive(self, intensity: float = 0.5) -> bool:
+        """Audio reactive effect (WLED only)."""
+        if self.use_wled:
+            return self.controller.audio_reactive(intensity)
+        else:
+            # Fallback for USB CDC
+            if intensity > 0.7:
+                return self.send_command("rainbow")
+            elif intensity > 0.3:
+                return self.send_command("speech")
+            else:
+                return self.send_command("idle")
+    
+    def celebration(self) -> bool:
+        """Celebration effect."""
+        if self.use_wled:
+            return self.controller.celebration()
+        else:
+            return self.send_command("demo")
+    
+    def fire(self) -> bool:
+        """Fire effect (WLED only)."""
+        if self.use_wled:
+            return self.controller.fire()
+        else:
+            return self.send_command("red")
     
     def vu_meter(self, volume: float) -> bool:
-        """
-        Create a VU meter effect based on volume level.
-        
-        Args:
-            volume: Volume level 0-100
-            
-        Returns:
-            True if command sent successfully
-        """
-        # For now, map volume to different animations
-        if volume < 10:
-            return self.clear()
-        elif volume < 30:
-            return self.idle_animation()
-        elif volume < 70:
-            return self.speech_animation()
+        """VU meter effect based on volume."""
+        if self.use_wled:
+            return self.controller.audio_reactive(volume / 100.0)
         else:
-            return self.rainbow()
+            # Original USB CDC implementation
+            if volume < 10:
+                return self.clear()
+            elif volume < 30:
+                return self.idle_animation()
+            elif volume < 70:
+                return self.speech_animation()
+            else:
+                return self.rainbow()
     
     def loading_bar(self, progress: float) -> bool:
-        """
-        Simulate a loading bar effect.
-        
-        Args:
-            progress: Progress percentage 0-100
-            
-        Returns:
-            True if commands sent successfully
-        """
-        # For a loading bar, we'll use a sequence of commands
-        if progress >= 100:
-            return self.rainbow()
-        elif progress > 0:
-            return self.speech_animation()
+        """Loading bar effect."""
+        if self.use_wled:
+            if progress >= 100:
+                return self.controller.celebration()
+            else:
+                # Use wipe effect with progress
+                speed = int(50 + progress * 2)
+                return self.controller.set_effect("wipe", speed=speed, intensity=200)
         else:
-            return self.clear()
+            # Original USB CDC implementation
+            if progress >= 100:
+                return self.rainbow()
+            elif progress > 0:
+                return self.speech_animation()
+            else:
+                return self.clear()
+    
+    # Headlights functionality
+    def toggle_headlights(self) -> bool:
+        """Toggle headlights mode on/off"""
+        if self.use_wled:
+            return self.controller.toggle_headlights()
+        else:
+            # For USB CDC, just toggle white color
+            return self.send_command("white")
+    
+    def headlights_on(self) -> bool:
+        """Turn on headlights mode"""
+        if self.use_wled:
+            return self.controller.headlights_on()
+        else:
+            return self.send_command("white")
+    
+    def headlights_off(self) -> bool:
+        """Turn off headlights mode"""
+        if self.use_wled:
+            return self.controller.headlights_off()
+        else:
+            return self.send_command("idle")
+    
+    def is_headlights_active(self) -> bool:
+        """Check if headlights mode is active"""
+        if self.use_wled:
+            return self.controller.is_headlights_active()
+        else:
+            return False  # USB CDC doesn't track headlights state
 
 
 class LightBarManager:
     """High-level manager for light bar operations with automatic reconnection."""
     
-    def __init__(self, device_path: Optional[str] = None):
+    def __init__(self, use_wled: bool = True, device_path: Optional[str] = None):
         """
         Initialize the light bar manager.
         
         Args:
-            device_path: Optional specific device path
+            use_wled: Use WLED if available
+            device_path: Optional specific device path for USB CDC
         """
-        self.controller = LightBarController(device_path)
+        self.controller = LightBarController(use_wled, device_path)
         self._stop_monitor = False
         self._monitor_thread: Optional[threading.Thread] = None
         
@@ -326,13 +541,26 @@ class LightBarManager:
                 self.controller.connect()
             time.sleep(5)  # Check every 5 seconds
     
+    # Additional state management methods
+    def set_robot_state(self, state: str) -> bool:
+        """Set robot state for appropriate lighting."""
+        return self.controller.set_robot_state(state)
+    
+    def audio_reactive(self, intensity: float = 0.5) -> bool:
+        """Set audio reactive lighting."""
+        return self.controller.audio_reactive(intensity)
+    
+    def celebration(self) -> bool:
+        """Trigger celebration lighting."""
+        return self.controller.celebration()
+    
     def __getattr__(self, name):
         """Delegate method calls to the controller."""
         return getattr(self.controller, name)
 
 
-# Global light bar instance
-light_bar = LightBarManager()
+# Global light bar instance - defaults to WLED if available
+light_bar = LightBarManager(use_wled=True)
 
 
 def rainbow_cycle(delay: float = 0.1) -> bool:  # pylint: disable=unused-argument

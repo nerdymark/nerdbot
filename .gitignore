@@ -76,6 +76,10 @@ package-lock.json
 *.hef
 hailo_model_zoo/
 
+# External projects with their own git repositories
+TTS/
+x120x/
+
 # Audio files
 *.wav
 *.mp3

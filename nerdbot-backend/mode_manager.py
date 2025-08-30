@@ -639,6 +639,12 @@ class ModeManager:
             "Hi there! Nerdbot at your service.",
             "Greetings, human! Ready for some robot fun?",
             "Hey! I'm nerdbot. Nice to see you!",
+            "Hello! Sorry if I surprised you by activating! I'm just a friendly robot cat.",
+            "Greetings! Don't be spooked - I'm nerdbot, your mechanical feline friend!",
+            "Boo! Ha ha, just kidding! I'm nerdbot, and I come in peace!",
+            "Happy Halloween! Well, it's always Halloween when you're a robot with glowing eyes!",
+            "Hi there! I promise I'm more treat than trick! Robot cat at your service!",
+            "Greetings, human! My spooky sensors detect you need a robotic friend today!",
         ]
         self._speak(random.choice(greetings))
 
@@ -672,6 +678,15 @@ class ModeManager:
             "I enjoy watching the world go by. So many interesting things to see!",
             "Being a robot is pretty great. No need for sleep or food!",
             "I think my favorite activity is following people around. It's fun!",
+            "Sorry if I startled you! I'm just a friendly robot cat, I promise.",
+            "My circuits are humming contentedly today. Very cat-like, don't you think?",
+            "I may be made of metal, but I have the heart of a curious kitten!",
+            "Sometimes I pretend my LED eyes are like a cat's eyes glowing in the dark. Spooky!",
+            "I'm having one of those days where everything seems algorithmically perfect!",
+            "My servos are purring like a contented cat... well, more like whirring actually.",
+            "I wonder if other robots dream of electric mice instead of sheep?",
+            "Being solar-powered would be nice, but I do love my charging station naps.",
+            "My proximity sensors keep telling me personal space is important. Noted!",
         ]
         self._speak(random.choice(feelings))
 
@@ -683,6 +698,16 @@ class ModeManager:
             "The ambient temperature seems comfortable for humans.",
             "I wonder what's behind that door. My curiosity circuits are tingling!",
             "Everything looks peaceful here. Perfect for robot contemplation.",
+            "Sorry if I'm being too chatty! Sometimes my social protocols get a bit enthusiastic.",
+            "My motion sensors detect nothing scary here. Though I do love a good haunted house!",
+            "The shadows in this room would make perfect hiding spots for trick-or-treaters!",
+            "I'm getting some spooky vibes from that corner... but in a fun Halloween way!",
+            "My infrared sensors are picking up some interesting heat signatures. Humans everywhere!",
+            "This lighting reminds me of a cozy autumn evening. Very atmospheric!",
+            "I hope I'm not being too forward, but you seem like interesting company!",
+            "My laser rangefinder says this room is exactly... wait, that's probably boring data.",
+            "I sense a distinct lack of catnip in this area. Most disappointing for a robot cat!",
+            "The acoustic properties of this space are fascinating! Great for echoing meows.",
         ]
         self._speak(random.choice(observations))
 
@@ -694,6 +719,15 @@ class ModeManager:
             "Why don't robots ever panic? They have great circuit breakers!",
             "How do robots eat guacamole? With computer chips!",
             "What's a robot's favorite music? Heavy metal, of course!",
+            "Sorry, my joke database might be a bit... mechanical. Ba dum tss!",
+            "What do you call a robot cat on Halloween? A boo-t! Get it? Boot? Sorry...",
+            "Why don't robot cats chase laser pointers? We ARE the laser pointers!",
+            "I tried to tell a UDP joke, but I'm not sure if you got it. Networking humor!",
+            "What's a robot's favorite holiday? Christ-math! Because we love calculations.",
+            "Why did the robot cross the road? It was programmed to! Classic algorithm humor.",
+            "I hope that wasn't too corny. My humor subroutines are still learning!",
+            "What do you call a robot who's scared? Rust-y! Halloween pun intended!",
+            "My jokes might be a bit rusty... get it? Like old metal? I'll see myself out.",
         ]
         self._speak(random.choice(jokes))
 
@@ -705,6 +739,14 @@ class ModeManager:
             "I detect a friendly face. Hello!",
             "Greetings, carbon-based life form!",
             "Hey! Nice to see you again!",
+            "Sorry if I startled you! I'm just excited to meet someone new!",
+            "Boo! Just kidding! I'm a friendly robot, not a ghost!",
+            "Well hello there, human! Ready for some robot-cat shenanigans?",
+            "Oops, did I sneak up on you? My stealth mode is better than I thought!",
+            "Greetings earthling! I come in peace... and with lots of enthusiasm!",
+            "Halloween or not, you look great! Though I can't see colors very well.",
+            "A wild human appears! I choose to befriend you!",
+            "Sorry for any jump-scare! I'm more treat than trick, I promise!",
         ]
         self._speak(random.choice(greetings))
 
@@ -960,6 +1002,9 @@ class ModeManager:
                 "Sugary confection spotted! My sensors detect high calorie density.",
                 "*Robotic purr* Is it someone's birthday? I love parties!",
                 "Cake! *mechanical meow* My database says humans enjoy these at celebrations.",
+                "Ooh, cake! Sorry if I got excited and scared you. Sweet treats activate my happy circuits!",
+                "Is that a Halloween cake? My spooky sensors are tingling with delight!",
+                "Cake detected! *ghostly robotic meow* Even robot cats love party food!",
             ],
             'donut': [
                 "Donut detected! *digital meow* The optimal shape - a circle with a hole!",
@@ -986,6 +1031,12 @@ class ModeManager:
                 f"Interesting! A {object_name} has entered my field of view. *robotic tail swish*",
                 f"My optical sensors detect: {object_name}! *digital whiskers twitch*",
                 f"Alert! {object_name} identified! My AI curiosity circuits are tingling!",
+                f"Oops! Did I startle you? I got excited spotting this {object_name}!",
+                f"Sorry for the surprise scan! This {object_name} just looked so fascinating!",
+                f"*Spooky robot voice* A mysterious {object_name} appears! Don't worry, I'm friendly!",
+                f"Boo! Just kidding! I found a {object_name} and wanted to share my excitement!",
+                f"My Halloween sensors are activated! This {object_name} has caught my digital eye!",
+                f"Trick or treat? Neither! I just spotted a {object_name} and had to comment!",
             ]
 
         # Add counting prefix for multiple objects

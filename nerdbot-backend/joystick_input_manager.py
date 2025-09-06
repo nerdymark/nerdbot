@@ -41,6 +41,12 @@ class JoystickInputManager:
         self.last_input_time = defaultdict(float)
         self.input_threshold = 0.01  # 10ms between identical inputs
         
+        # Button debouncing - prevent rapid button presses
+        self.button_last_press = defaultdict(float)
+        self.button_debounce_time = 0.5  # 500ms debounce for most buttons
+        self.meme_button_debounce_time = 1.0  # 1 second debounce for meme sound button
+        self.laser_headlight_debounce_time = 0.5  # 500ms debounce for laser/headlight buttons
+        
     def find_controller(self) -> bool:
         """Find and initialize the first available joystick"""
         pygame.joystick.quit()
@@ -94,13 +100,80 @@ class JoystickInputManager:
         return True
     
     def _toggle_headlights(self):
-        """Toggle headlights functionality"""
+        """Toggle headlights functionality via HTTP API for state synchronization"""
         try:
-            from light_bar.light_bar import light_bar
-            result = light_bar.toggle_headlights()
-            self.logger.info(f"Headlights toggled: {result}")
+            import requests
+            
+            # Use the explicit on/off endpoints based on current state
+            status_response = requests.get('http://localhost:5000/api/headlights/status', timeout=0.5)
+            if status_response.status_code == 200:
+                current_status = status_response.json().get('headlights_on', False)
+                self.logger.info(f"Current headlights status: {'on' if current_status else 'off'}")
+                
+                # Use explicit on/off instead of toggle to avoid race conditions
+                if current_status:
+                    response = requests.post('http://localhost:5000/api/headlights/off', timeout=0.5)
+                    target_state = False
+                else:
+                    response = requests.post('http://localhost:5000/api/headlights/on', timeout=0.5)
+                    target_state = True
+                    
+                if response.status_code == 200:
+                    self.logger.info(f"Headlights turned {'on' if target_state else 'off'} successfully")
+                else:
+                    self.logger.error(f"Headlights API request failed: {response.status_code}")
+            else:
+                self.logger.warning("Could not get headlights status")
         except Exception as e:
-            self.logger.error(f"Failed to toggle headlights: {e}")
+            self.logger.error(f"Failed to toggle headlights via API: {e}")
+    
+    def _toggle_laser(self):
+        """Toggle laser functionality via HTTP API to avoid GPIO conflicts"""
+        try:
+            import requests
+            
+            # Use the explicit on/off endpoints based on current state
+            status_response = requests.get('http://localhost:5000/api/laser/status', timeout=0.5)
+            if status_response.status_code == 200:
+                current_status = status_response.json().get('laser_on', False)
+                self.logger.info(f"Current laser status: {'on' if current_status else 'off'}")
+                
+                # Use explicit on/off instead of toggle to avoid race conditions
+                if current_status:
+                    response = requests.post('http://localhost:5000/api/laser/off', timeout=0.5)
+                    target_state = False
+                else:
+                    response = requests.post('http://localhost:5000/api/laser/on', timeout=0.5)
+                    target_state = True
+                    
+                if response.status_code == 200:
+                    self.logger.info(f"Laser turned {'on' if target_state else 'off'} successfully")
+                else:
+                    self.logger.error(f"Laser API request failed: {response.status_code}")
+            else:
+                self.logger.warning("Could not get laser status")
+        except Exception as e:
+            self.logger.error(f"Failed to toggle laser via API: {e}")
+    
+    def _play_random_meme_sound(self):
+        """Play random meme sound via HTTP API (non-blocking)"""
+        def make_request():
+            try:
+                import requests
+                # Use the Flask server's random meme sound API with short timeout
+                response = requests.post('http://localhost:5000/api/meme_sound/random', timeout=0.5)
+                if response.status_code == 200:
+                    data = response.json()
+                    self.logger.info(f"Random meme sound started: {data.get('message', 'Success')}")
+                else:
+                    self.logger.error(f"Random meme sound API request failed: {response.status_code}")
+            except Exception as e:
+                self.logger.error(f"Failed to play random meme sound via API: {e}")
+        
+        # Run HTTP request in separate thread to avoid blocking button detection
+        import threading
+        threading.Thread(target=make_request, daemon=True).start()
+        self.logger.info("Random meme sound request sent (non-blocking)")
     
     def _handle_dpad_input(self, dpad_x: float, dpad_y: float):
         """Handle D-pad input for movement controls"""
@@ -180,26 +253,43 @@ class JoystickInputManager:
                     self._notify_motor_subscribers('rotate', direction='right', intensity=speed)
     
     def _handle_button_input(self, button_id: int, pressed: bool):
-        """Handle button press events"""
+        """Handle button press events with debouncing"""
         if not pressed:  # Only handle button press, not release
             return
+            
+        # Check debouncing for all buttons
+        current_time = time.time()
+        if button_id == 5:  # Meme sound button
+            debounce_time = self.meme_button_debounce_time
+        elif button_id in [10, 11]:  # Headlight and laser buttons
+            debounce_time = self.laser_headlight_debounce_time
+        else:
+            debounce_time = self.button_debounce_time
+        
+        if current_time - self.button_last_press[button_id] < debounce_time:
+            return  # Skip if too soon after last press
+        self.button_last_press[button_id] = current_time
             
         # Debug logging to identify button IDs
         self.logger.info(f"Button pressed: ID {button_id}")
             
         # Steam Controller specific button mappings
-        if button_id == 0:  # A button - center servos
-            self._notify_servo_subscribers('center')
+        if button_id == 0:  # A button - center pan only (don't interrupt tilt tracking)
+            self._notify_servo_subscribers('pan_center')
         elif button_id == 1:  # Button ID 1 - reserved for future use
             pass
         elif button_id == 2:  # X button - reserved for future use
             pass
         elif button_id == 3:  # B button - emergency stop motors
             self._notify_motor_subscribers('stop')
+        elif button_id == 5:  # Y button - play random meme sound
+            self._play_random_meme_sound()
         elif button_id == 6:  # Back/Menu button (left of Steam button) - reserved for future use
             pass
         elif button_id == 10:  # Button left of Menu button - toggle headlights
             self._toggle_headlights()
+        elif button_id == 11:  # Button ID 11 - toggle laser
+            self._toggle_laser()
         # Additional buttons could be mapped here (4=LB, 5=RB, 7=Start, etc.)
     
     def _handle_trigger_input(self, left_trigger: float, right_trigger: float):

@@ -1,68 +1,94 @@
-# Light Bar USB CDC Controller
+# Light Bar WLED Controller
 
-This module provides a Python interface for controlling an LED light bar connected via USB CDC (Communication Device Class).
+This module provides a Python interface for controlling an LED light bar using WLED over WiFi.
 
 ## Overview
 
-The light bar is now a USB-connected CircuitPython device that accepts commands over serial communication. This module provides both low-level and high-level interfaces for controlling the device.
+The light bar is now a WiFi-connected WLED device that accepts HTTP API commands. This module provides both low-level HTTP API access and high-level interfaces for controlling robot state-based lighting effects.
 
-## Device Commands
+## WLED Device
 
-The USB CDC device accepts the following text commands:
+The system uses a WLED-compatible ESP32/ESP8266 device with the following default configuration:
+- **IP Address**: `10.0.1.166`
+- **WLED Version**: Compatible with WLED 0.13+
+- **Connection**: WiFi HTTP API
 
-- `rainbow` - Knight Rider style animation using rainbow colors
-- `red` - Knight Rider style animation using red colors  
-- `speech` - Rapid radial animation from center simulating speech
-- `idle` - Peaceful idle animation with slow breathing effect
-- `waterfall` - Waterfall animation
-- `clear` - Turn off all pixels
-- `demo` - Run a quick demo of all animations
+## Robot States and Effects
+
+The light bar responds to different robot states with appropriate lighting effects:
+
+### Available States
+- **`startup`** - Boot sequence with rainbow effect
+- **`idle`** - Peaceful breathing animation 
+- **`speaking`** - Dynamic speech visualization
+- **`listening`** - Pulsing blue effect
+- **`thinking`** - Scanning yellow effect
+- **`alert`** - Rapid red warning
+- **`error`** - Flashing red error state
+- **`shutdown`** - Fade out sequence
+
+### Special Modes
+- **`headlights`** - Solid white front lighting (overrides other states)
+- **`audio_reactive`** - Dynamic response to audio levels
 
 ## Usage
 
 ### Simple Usage
 
 ```python
-from light_bar import light_bar
+from light_bar.light_bar import light_bar
 
-# Start the light bar manager
+# Initialize and start the light bar
 if light_bar.start():
-    # Send commands
-    light_bar.rainbow()
-    light_bar.speech_animation()
-    light_bar.clear()
+    # Set robot states
+    light_bar.set_robot_state("idle")
+    light_bar.set_robot_state("speaking")
+    light_bar.set_robot_state("alert")
+    
+    # Special functions
+    light_bar.headlights_on()
+    light_bar.audio_reactive(0.8)  # 80% intensity
     
     # Stop when done
     light_bar.stop()
 ```
 
-### Advanced Usage
+### Advanced Usage with WLED Controller
 
 ```python
-from light_bar import LightBarController
+from light_bar.wled_controller import WLEDController
+from light_bar.light_bar import RobotState
 
-# Create a controller with specific device path
-controller = LightBarController('/dev/ttyACM0')
+# Create controller with custom host
+controller = WLEDController("http://10.0.1.166")
 
-if controller.connect():
-    # Send raw commands
-    controller.send_command('rainbow')
-    
-    # Use convenience methods
-    controller.speech_animation()
-    controller.vu_meter(75)  # 75% volume level
-    
-    controller.disconnect()
+# Set specific effects
+controller.set_robot_state(RobotState.SPEAKING)
+
+# Direct WLED API access
+controller.set_state({
+    "on": True,
+    "bri": 128,
+    "seg": [{
+        "fx": 12,  # Rainbow effect
+        "sx": 128,  # Speed
+        "ix": 128   # Intensity
+    }]
+})
+
+# Headlights mode (overrides other effects)
+controller.headlights_on()
+controller.headlights_off()
 ```
 
 ### Legacy API Compatibility
 
-The module maintains compatibility with the previous pi5neo-based API:
+The module maintains compatibility with previous USB CDC API:
 
 ```python
-from light_bar import rainbow_cycle, loading_bar, vu_meter
+from light_bar.light_bar import rainbow_cycle, loading_bar, vu_meter
 
-# These functions now send commands to the USB device
+# These functions now send HTTP requests to WLED device
 rainbow_cycle()
 loading_bar(50)  # 50% progress
 vu_meter(80)     # 80% volume
@@ -70,74 +96,105 @@ vu_meter(80)     # 80% volume
 
 ## Features
 
-- **Automatic Device Detection**: Automatically finds USB CDC devices
-- **Connection Monitoring**: Automatic reconnection if device disconnects
+- **WiFi Communication**: HTTP-based control over WiFi network
+- **State-Based Lighting**: Automatic effects based on robot behavior
+- **Headlights Mode**: Override system for solid white lighting
+- **Audio Reactive**: Dynamic response to audio input
+- **Brightness Control**: Automatic brightness adjustment
+- **Error Recovery**: Automatic reconnection and error handling
 - **Thread-Safe**: Safe to use from multiple threads
-- **Error Handling**: Robust error handling and logging
-- **Cross-Platform**: Works on Linux, macOS, and Windows
+
+## Configuration
+
+### WLED Device Setup
+
+1. Flash WLED firmware to ESP32/ESP8266
+2. Connect to WiFi network
+3. Configure static IP `10.0.1.166` (or update host in code)
+4. Set up LED strip configuration in WLED web interface
+
+### Network Configuration
+
+Default WLED device configuration:
+```
+IP: 10.0.1.166
+Port: 80 (HTTP)
+API Endpoint: /json/state
+```
+
+To use a different IP address, update the host in your code:
+```python
+from light_bar.light_bar import light_bar
+# Configure before starting
+light_bar.controller.host = "http://YOUR_WLED_IP"
+```
+
+## WLED Effects Used
+
+The system uses these WLED effects:
+- **0**: Solid color
+- **1**: Blink
+- **12**: Rainbow
+- **13**: Rainbow cycle
+- **46**: Colorwaves
+- **54**: Spots fade
+- **110**: Flow
 
 ## Requirements
 
-- `pyserial` - For serial communication
-- USB CDC compatible device running CircuitPython
+- `requests` - For HTTP communication
+- WLED-compatible device on same network
+- Python 3.7+
 
 ## Installation
 
 ```bash
-pip install pyserial
+pip install requests
 ```
 
-## Device Setup
+## Network Setup
 
-The device should be running CircuitPython code similar to:
+Ensure the WLED device and NerdBot are on the same WiFi network:
+
+1. Configure WLED device WiFi through web interface
+2. Set static IP or update code with device IP
+3. Test connectivity: `ping 10.0.1.166`
+
+## API Integration
+
+The light bar integrates with Flask server endpoints:
 
 ```python
-import supervisor
-import usb_cdc
-import time
-
-def process_command(command):
-    command = command.strip().lower()
-    if command == "rainbow":
-        # Rainbow animation
-        pass
-    elif command == "clear":
-        # Clear pixels
-        pass
-    # ... other commands
-
-while True:
-    if supervisor.runtime.serial_connected:
-        if usb_cdc.console.in_waiting > 0:
-            try:
-                command = usb_cdc.console.readline().decode('utf-8')
-                if command:
-                    process_command(command)
-            except:
-                pass
-    time.sleep(0.1)
+# Flask routes automatically control light bar
+@app.route('/api/speak', methods=['POST'])
+def speak():
+    light_bar.set_robot_state("speaking")
+    # ... handle speech
+    light_bar.set_robot_state("idle")
 ```
 
 ## Troubleshooting
 
-### Device Not Found
-
-1. Check that the device is connected via USB
-2. Verify the device is running CircuitPython with USB CDC enabled
-3. Check system permissions for serial devices
-4. Try specifying the device path manually
+### Device Not Responding
+1. Check WLED device is powered and connected to WiFi
+2. Verify IP address is correct: `ping 10.0.1.166`
+3. Check WLED web interface is accessible
+4. Ensure no firewall blocking HTTP traffic
 
 ### Connection Issues
+1. Verify network connectivity between devices
+2. Check WLED device status LED
+3. Try accessing WLED web interface directly
+4. Restart WLED device if unresponsive
 
-1. Ensure no other application is using the device
-2. Check the device appears in system device manager
-3. Try unplugging and reconnecting the device
-4. Verify the baudrate matches (default: 115200)
+### Effect Issues
+1. Check WLED firmware version (0.13+ recommended)
+2. Verify LED strip configuration in WLED
+3. Test effects through WLED web interface
+4. Check log output for HTTP errors
 
-### Permission Errors (Linux)
-
-Add your user to the dialout group:
-```bash
-sudo usermod -a -G dialout $USER
-```
-Log out and back in for changes to take effect.
+### Headlights Not Working
+1. Ensure headlights mode is enabled: `light_bar.headlights_on()`
+2. Check headlights state: `light_bar.is_headlights_active()`
+3. Verify WLED brightness settings
+4. Test with direct WLED API call

@@ -23,11 +23,14 @@ from urllib.error import URLError, HTTPError
 from collections import deque
 from functools import lru_cache
 import cv2
-from flask import Flask, Response, render_template, jsonify, request  # , stream_with_context
+from flask import Flask, Response, render_template, jsonify, request, send_file  # , stream_with_context
 from flask_restful import Api
 from flask_cors import CORS
 from flask_apscheduler import APScheduler
 import libcamera
+import atexit
+import signal
+from pathlib import Path
 import numpy as np
 import psutil
 import pyaudio
@@ -44,9 +47,58 @@ from motor_control import motors
 from servo_control import servos
 from x120 import bat
 from light_bar.light_bar import light_bar
+from laser_control.laser_control import LaserControl
 import sys
 sys.path.append('/home/mark/nerdbot-backend')
 from mode_manager import mode_manager
+# Audio client code embedded directly to avoid import issues
+import uuid
+from pathlib import Path
+
+AUDIO_REQUEST_DIR = '/tmp/nerdbot_audio'
+
+def ensure_audio_request_dir():
+    """Ensure the audio request directory exists"""
+    Path(AUDIO_REQUEST_DIR).mkdir(exist_ok=True)
+
+def play_random_meme():
+    """Request a random meme sound"""
+    logging.info("play_random_meme called")
+    ensure_audio_request_dir()
+    
+    request = {
+        'type': 'random',
+        'timestamp': time.time()
+    }
+    
+    request_file = Path(AUDIO_REQUEST_DIR) / f"random_{uuid.uuid4().hex[:8]}.json"
+    logging.info(f"Creating request file: {request_file}")
+    
+    with open(request_file, 'w') as f:
+        json.dump(request, f)
+    
+    logging.info("Request file created successfully")
+    return True
+
+def play_specific_sound(file_path):
+    """Request a specific sound file"""
+    logging.info(f"play_specific_sound called with: {file_path}")
+    ensure_audio_request_dir()
+    
+    request = {
+        'type': 'specific',
+        'file_path': file_path,
+        'timestamp': time.time()
+    }
+    
+    request_file = Path(AUDIO_REQUEST_DIR) / f"specific_{uuid.uuid4().hex[:8]}.json"
+    logging.info(f"Creating request file: {request_file}")
+    
+    with open(request_file, 'w') as f:
+        json.dump(request, f)
+    
+    logging.info("Request file created successfully")
+    return True
 from tracking import OptimizedTracker
 
 
@@ -101,13 +153,28 @@ try:
 except Exception as e:
     logging.error(f"Light bar initialization error: {e}")
 
-CORS(app)  # Enable CORS for all routes
+# Initialize laser control
+try:
+    laser_control = LaserControl()
+    logging.info("Laser control initialized successfully")
+except Exception as e:
+    logging.error(f"Laser control initialization error: {e}")
+    laser_control = None
+
+CORS(app, resources={r"/api/*": {"origins": "*", "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"], "allow_headers": ["Content-Type"]}})  # Enable CORS for all routes with explicit methods
 
 GOOGLE_GEMINI_KEY = config.get('google_gemini_key')
 MEME_SOUNDS_FOLDER = config.get('meme_sounds_folder')
 MEME_SOUNDS_FOLDER_CONVERTED = config.get('meme_sounds_folder_converted')
-MEME_SOUNDS = os.listdir(MEME_SOUNDS_FOLDER_CONVERTED)
+MEME_SOUNDS = [f for f in os.listdir(MEME_SOUNDS_FOLDER_CONVERTED) if os.path.isfile(os.path.join(MEME_SOUNDS_FOLDER_CONVERTED, f))]
 # MEME_SOUNDS = os.listdir(MEME_SOUNDS_FOLDER)
+
+# Import thumbnail generator
+from thumbnail_generator import ThumbnailGenerator
+thumbnail_generator = ThumbnailGenerator()
+
+# Audio is now handled by separate audio service via file-based requests
+# No initialization needed
 
 DETECT_LABELS = [
     "person",
@@ -987,9 +1054,7 @@ def pan(direction):
         servo_angle = servos.pan('center')
         PAN_ANGLE = servo_angle
         print(f"Panned center to {servo_angle}")
-        servo_angle = servos.tilt('forward')
-        TILT_ANGLE = servo_angle
-        print(f"Tilted forward to {servo_angle}")
+        # Don't automatically reset tilt - preserve tracking
 
     return jsonify({'message': f"Panned {direction} to {PAN_ANGLE}"}), 200
 
@@ -1073,6 +1138,67 @@ def headlights_off():
     except Exception as e:
         logging.error(f"Headlights off error: {e}")
         return jsonify({'error': 'Failed to turn off headlights'}), 500
+
+
+@app.route('/api/laser/toggle', methods=['GET', 'POST'])
+def toggle_laser():
+    """
+    Toggle laser on/off
+    """
+    if laser_control is None:
+        return jsonify({'error': 'Laser control not available'}), 503
+    try:
+        result = laser_control.toggle_laser()
+        status = "on" if laser_control.is_laser_active() else "off"
+        return jsonify({'message': f'Laser toggled {status}', 'laser_on': laser_control.is_laser_active()}), 200
+    except Exception as e:
+        logging.error(f"Laser toggle error: {e}")
+        return jsonify({'error': 'Failed to toggle laser'}), 500
+
+
+@app.route('/api/laser/status', methods=['GET'])
+def laser_status():
+    """
+    Get current laser status
+    """
+    if laser_control is None:
+        return jsonify({'error': 'Laser control not available'}), 503
+    try:
+        status = laser_control.is_laser_active()
+        return jsonify({'laser_on': status}), 200
+    except Exception as e:
+        logging.error(f"Laser status error: {e}")
+        return jsonify({'error': 'Failed to get laser status'}), 500
+
+
+@app.route('/api/laser/on', methods=['POST'])
+def laser_on():
+    """
+    Turn laser on
+    """
+    if laser_control is None:
+        return jsonify({'error': 'Laser control not available'}), 503
+    try:
+        result = laser_control.activate_laser()
+        return jsonify({'message': 'Laser turned on', 'success': result}), 200
+    except Exception as e:
+        logging.error(f"Laser on error: {e}")
+        return jsonify({'error': 'Failed to turn on laser'}), 500
+
+
+@app.route('/api/laser/off', methods=['POST'])
+def laser_off():
+    """
+    Turn laser off
+    """
+    if laser_control is None:
+        return jsonify({'error': 'Laser control not available'}), 503
+    try:
+        result = laser_control.deactivate_laser()
+        return jsonify({'message': 'Laser turned off', 'success': result}), 200
+    except Exception as e:
+        logging.error(f"Laser off error: {e}")
+        return jsonify({'error': 'Failed to turn off laser'}), 500
 
 
 @app.route('/api/vitals', methods=['GET', 'POST'])
@@ -1231,9 +1357,66 @@ def light_bar_pixels(count):
 @app.route('/api/meme_sounds', methods=['GET', 'POST'])
 def meme_sounds():
     """
-    Get the list of meme sounds
+    Get the list of meme sounds with thumbnail information
     """
-    return jsonify(MEME_SOUNDS), 200
+    sounds_with_thumbnails = []
+    for i, sound_file in enumerate(MEME_SOUNDS):
+        thumbnail_path = thumbnail_generator.get_thumbnail_path(sound_file)
+        thumbnail_url = f'/api/meme_sounds/thumbnail/{i}' if thumbnail_path else None
+        
+        sounds_with_thumbnails.append({
+            'id': i,
+            'filename': sound_file,
+            'name': os.path.splitext(sound_file)[0].replace('-', ' ').replace('_', ' '),
+            'thumbnail_url': thumbnail_url
+        })
+    
+    return jsonify(sounds_with_thumbnails), 200
+
+
+@app.route('/api/meme_sounds/thumbnail/<int:sound_id>', methods=['GET'])
+def get_meme_sound_thumbnail(sound_id):
+    """
+    Get thumbnail image for a specific meme sound
+    """
+    if sound_id < 0 or sound_id >= len(MEME_SOUNDS):
+        return jsonify({'error': 'Invalid sound_id'}), 404
+    
+    sound_file = MEME_SOUNDS[sound_id]
+    thumbnail_path = thumbnail_generator.get_thumbnail_path(sound_file)
+    
+    if thumbnail_path and os.path.exists(thumbnail_path):
+        return send_file(thumbnail_path, mimetype='image/png')
+    else:
+        return jsonify({'error': 'Thumbnail not found'}), 404
+
+
+@app.route('/api/meme_sounds/regenerate_thumbnail/<int:sound_id>', methods=['POST'])
+def regenerate_meme_sound_thumbnail(sound_id):
+    """
+    Regenerate thumbnail for a specific meme sound
+    """
+    if sound_id < 0 or sound_id >= len(MEME_SOUNDS):
+        return jsonify({'error': 'Invalid sound_id'}), 404
+    
+    sound_file = MEME_SOUNDS[sound_id]
+    
+    try:
+        # Generate new thumbnail with force_regenerate=True to overwrite existing
+        thumbnail_path = thumbnail_generator.generate_thumbnail_for_sound(sound_file, force_regenerate=True)
+        
+        if thumbnail_path and os.path.exists(thumbnail_path):
+            return jsonify({
+                'success': True,
+                'message': f'Thumbnail regenerated for {sound_file}',
+                'thumbnail_url': f'/api/meme_sounds/thumbnail/{sound_id}?t={int(time.time())}'  # Add timestamp to bust cache
+            }), 200
+        else:
+            return jsonify({'error': 'Failed to generate thumbnail'}), 500
+            
+    except Exception as e:
+        app.logger.error(f"Error regenerating thumbnail: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/meme_sounds/add_from_url', methods=['POST'])
@@ -1302,9 +1485,20 @@ def add_meme_sound_from_url():
             logger.error(f'Failed to convert {filename}: {e}')
             return jsonify({'error': f'Failed to convert audio file: {str(e)}'}), 500
         
+        # Generate thumbnail for the new sound
+        try:
+            thumbnail_path = thumbnail_generator.generate_thumbnail_for_sound(filename)
+            if thumbnail_path:
+                logger.info(f'Successfully generated thumbnail for {filename}')
+            else:
+                logger.warning(f'Failed to generate thumbnail for {filename}')
+        except Exception as e:
+            logger.error(f'Error generating thumbnail for {filename}: {e}')
+            # Don't fail the whole request if thumbnail generation fails
+        
         global MEME_SOUNDS
         # Update the global MEME_SOUNDS list
-        MEME_SOUNDS = os.listdir(MEME_SOUNDS_FOLDER_CONVERTED)
+        MEME_SOUNDS = [f for f in os.listdir(MEME_SOUNDS_FOLDER_CONVERTED) if os.path.isfile(os.path.join(MEME_SOUNDS_FOLDER_CONVERTED, f))]
         
         return jsonify({
             'message': f'Successfully added sound: {filename}',
@@ -1372,9 +1566,21 @@ def delete_meme_sound(sound_id):
             error_msg = f'Failed to delete converted file: {str(e)}'
             errors.append(error_msg)
             logger.error(error_msg)
+        
+        # Delete thumbnail if it exists
+        try:
+            thumbnail_path = thumbnail_generator.get_thumbnail_path(filename)
+            if thumbnail_path and os.path.exists(thumbnail_path):
+                os.remove(thumbnail_path)
+                deleted_files.append('thumbnail')
+                logger.info(f'Deleted thumbnail: {thumbnail_path}')
+        except Exception as e:
+            error_msg = f'Failed to delete thumbnail: {str(e)}'
+            errors.append(error_msg)
+            logger.error(error_msg)
     
         # Update the global MEME_SOUNDS list
-        MEME_SOUNDS = os.listdir(MEME_SOUNDS_FOLDER_CONVERTED)
+        MEME_SOUNDS = [f for f in os.listdir(MEME_SOUNDS_FOLDER_CONVERTED) if os.path.isfile(os.path.join(MEME_SOUNDS_FOLDER_CONVERTED, f))]
 
         # Determine response based on what was deleted
         if deleted_files:
@@ -1445,8 +1651,8 @@ def track_detections_front_startup():
     logger.info('Starting optimized detection tracking')
     labels = imx500_get_labels()
     
-    # Update rate for stable tracking (increased to 200ms for less seeking)
-    update_interval = 0.2
+    # Update rate for stable tracking (reduced for smoother coordination)
+    update_interval = 0.1
     
     while True:
         # Only track if in a follow mode or idle mode
@@ -1478,12 +1684,13 @@ def track_detections_front_startup():
 @app.route('/api/meme_sound/<int:sound_id>', methods=['GET', 'POST'])
 def meme_sound(sound_id):
     """
-    Play the meme sound with the specified sound_id
+    Play the meme sound with the specified sound_id (supports concurrent playback)
     """
     if sound_id < 0 or sound_id >= len(MEME_SOUNDS):
         return jsonify({'message': 'Invalid sound_id'}), 400
 
     sound = MEME_SOUNDS[sound_id]
+    sound_file_path = os.path.join(MEME_SOUNDS_FOLDER_CONVERTED, sound)
     
     # Set light bar to audio reactive mode
     try:
@@ -1491,93 +1698,145 @@ def meme_sound(sound_id):
     except Exception as e:
         logging.warning(f"Light bar audio effect failed: {e}")
 
-    audio1 = pyaudio.PyAudio()
-
-    stream = audio1.open(format=pyaudio.paInt16,
-                         output_device_index=AUDIO_DEVICE_INDEX,
-                         channels=1,
-                         rate=AUDIO_RATE,
-                         frames_per_buffer=AUDIO_CHUNK,
-                         output=True)
-
-    # Read and process the audio file
-    meme_audio = open(MEME_SOUNDS_FOLDER_CONVERTED + sound, 'rb').read()
-    meme_audio = AudioSegment.from_mp3(io.BytesIO(meme_audio))
-    meme_audio = meme_audio.set_frame_rate(AUDIO_RATE)
-    meme_audio = meme_audio.set_channels(1)
-    meme_audio = meme_audio.set_sample_width(2)
-    meme_audio = meme_audio.normalize()
-
-    # Convert AudioSegment to raw audio data
-    raw_data = meme_audio.raw_data
-
-    # Write raw audio data to the stream in chunks
-    for i in range(0, len(raw_data), AUDIO_CHUNK):
-        stream.write(raw_data[i:i + AUDIO_CHUNK])
-
-    stream.stop_stream()
-    stream.close()
-    
-    # Return to idle after playing sound
+    # Play sound using audio service
     try:
-        light_bar.set_robot_state("idle")
+        success = play_specific_sound(sound_file_path)
+        logging.info(f"Requested playback of {sound} via audio service")
+        
+        # Return to idle after a short delay (don't wait for sound to finish)
+        def reset_light_bar():
+            time.sleep(1.0)  # Brief delay before returning to idle
+            try:
+                light_bar.set_robot_state("idle")
+            except Exception as e:
+                logging.warning(f"Light bar idle effect failed: {e}")
+        
+        threading.Thread(target=reset_light_bar, daemon=True).start()
+        
+        return jsonify({
+            'message': f'Meme Sound Launched (Fire-and-Forget): {sound}',
+            'success': success
+        }), 200
+            
     except Exception as e:
-        logging.warning(f"Light bar idle effect failed: {e}")
-    
-    return jsonify({'message': 'Meme Sound Played'}), 200
+        logging.error(f"Error playing meme sound {sound}: {e}")
+        return jsonify({'error': f'Failed to play sound: {e}'}), 500
 
 
 @app.route('/api/meme_sound/random', methods=['GET', 'POST'])
 def random_meme_sound():
     """
-    Play a random meme sound from the MEME_SOUNDS_FOLDER_CONVERTED
+    Play a random meme sound using the concurrent audio manager
     """
-    logger = logging.getLogger(__name__)
-    shuffle(MEME_SOUNDS)  # Shuffle the list to avoid repetition
-    sound_id = randint(0, len(MEME_SOUNDS) - 1)
-    sound = MEME_SOUNDS[sound_id]
-    logger.info('Playing %s', sound)
+    import random
     
-    # Set light bar to celebration mode for random sounds
+    if not MEME_SOUNDS:
+        return jsonify({'status': 'error', 'message': 'No sounds'}), 404
+    
+    # Pick random sound
+    sound = random.choice(MEME_SOUNDS)
+    sound_path = os.path.join(MEME_SOUNDS_FOLDER_CONVERTED, sound)
+    
+    # Set light bar to audio reactive mode
     try:
-        light_bar.celebration()
+        light_bar.audio_reactive(0.7)  # Medium-high intensity for memes
     except Exception as e:
-        logger.warning(f"Light bar celebration effect failed: {e}")
-    
-    try:
-        audio1 = pyaudio.PyAudio()
+        logging.warning(f"Light bar audio effect failed: {e}")
 
-        stream = audio1.open(format=pyaudio.paInt16,
-                             output_device_index=AUDIO_DEVICE_INDEX,
-                             channels=1,
-                             rate=AUDIO_RATE,
-                             frames_per_buffer=AUDIO_CHUNK,
-                             output=True)
-        meme_audio = open(MEME_SOUNDS_FOLDER_CONVERTED + sound, 'rb').read()
-        meme_audio = AudioSegment.from_mp3(io.BytesIO(meme_audio))
-        meme_audio = meme_audio.set_frame_rate(AUDIO_RATE)
-        meme_audio = meme_audio.set_channels(1)
-        meme_audio = meme_audio.set_sample_width(2)
-        raw_data = meme_audio.raw_data
-        stream.write(raw_data)
-        time.sleep(len(raw_data) / (AUDIO_RATE * 2))  # Add delay to ensure audio plays completely
-        stream.stop_stream()
-        stream.close()
-        audio1.terminate()  # Ensure resources are released
+    # Play sound using audio service
+    try:
+        success = play_random_meme()
+        logging.info(f"Requested random meme sound via audio service")
         
-        # Return to idle after playing sound
-        try:
-            light_bar.set_robot_state("idle")
-        except Exception as e:
-            logger.warning(f"Light bar idle effect failed: {e}")
+        # Return to idle after a short delay (don't wait for sound to finish)
+        def reset_light_bar():
+            time.sleep(1.0)  # Brief delay before returning to idle
+            try:
+                light_bar.set_robot_state("idle")
+            except Exception as e:
+                logging.warning(f"Light bar idle effect failed: {e}")
         
-        return jsonify({'message': f'Meme Sound Played: {sound}'}), 200
-    except Exception as e:  # pylint: disable=broad-except
-        pa_device_inf = audio1.get_default_output_device_info()
-        logger.info('Default Output Device Info: %s', pa_device_inf)
-        logger.error('Error: %s while playing %s', e, sound)
-        logger.error(traceback.format_exc())
-        return jsonify({'message': f'Error: {e} while playing {sound}'}), 500
+        threading.Thread(target=reset_light_bar, daemon=True).start()
+        
+        return jsonify({
+            'status': 'INSTANT_SUCCESS', 
+            'sound': sound,
+            'message': f'FIRED: {sound}',
+            'success': success
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Error playing random meme sound {sound}: {e}")
+        return jsonify({'status': 'launch_failed', 'error': str(e)}), 500
+
+
+@app.route('/api/debug/audio_test', methods=['POST'])
+def debug_audio_test():
+    """
+    Debug endpoint to test audio execution directly
+    """
+    import subprocess
+    import os
+    
+    test_file = '/home/mark/nerdbot-backend/assets/meme_sounds_converted/applepay.mp3'
+    
+    results = []
+    
+    # Test 1: Direct paplay
+    try:
+        result = subprocess.run(['paplay', test_file], 
+                              capture_output=True, text=True, timeout=5)
+        results.append({
+            'test': 'direct_paplay',
+            'success': result.returncode == 0,
+            'returncode': result.returncode,
+            'stdout': result.stdout,
+            'stderr': result.stderr
+        })
+    except Exception as e:
+        results.append({
+            'test': 'direct_paplay',
+            'success': False,
+            'error': str(e)
+        })
+    
+    # Test 2: systemd-run paplay
+    try:
+        result = subprocess.run(['systemd-run', '--user', '--scope', 'paplay', test_file], 
+                              capture_output=True, text=True, timeout=10)
+        results.append({
+            'test': 'systemd_run_paplay',
+            'success': result.returncode == 0,
+            'returncode': result.returncode,
+            'stdout': result.stdout,
+            'stderr': result.stderr
+        })
+    except Exception as e:
+        results.append({
+            'test': 'systemd_run_paplay',
+            'success': False,
+            'error': str(e)
+        })
+    
+    # Test 3: Ultimate concurrent audio manager
+    try:
+        success = concurrent_audio.play_audio_file_instant(test_file)
+        results.append({
+            'test': 'concurrent_audio_manager',
+            'success': success,
+            'message': 'Audio manager called'
+        })
+    except Exception as e:
+        results.append({
+            'test': 'concurrent_audio_manager',
+            'success': False,
+            'error': str(e)
+        })
+    
+    return jsonify({
+        'message': 'Audio debug tests completed',
+        'results': results
+    }), 200
 
 
 def visual_awareness():
@@ -1702,6 +1961,234 @@ def health():
     return jsonify({'message': 'Healthy'}), 200
 
 
+def cleanup_gpio():
+    """
+    Cleanup GPIO resources on shutdown
+    """
+    try:
+        # Reset GPIO 21 (laser control)
+        import lgpio
+        chip = lgpio.gpiochip_open(0)
+        try:
+            lgpio.gpio_free(chip, 21)
+            logging.info("GPIO 21 (laser) freed during cleanup")
+        except:
+            pass
+        lgpio.gpiochip_close(chip)
+    except Exception as e:
+        logging.warning(f"GPIO cleanup failed: {e}")
+
+
+def cleanup_resources():
+    """
+    Cleanup all resources on shutdown
+    """
+    logging.info("Performing shutdown cleanup...")
+    
+    try:
+        # Stop all motors
+        motors.stop()
+        logging.info("Motors stopped")
+    except Exception as e:
+        logging.warning(f"Error stopping motors: {e}")
+    
+    try:
+        # Center servos
+        servos.reset_servos()
+        logging.info("Servos reset to center")
+    except Exception as e:
+        logging.warning(f"Error resetting servos: {e}")
+    
+    try:
+        # Cleanup laser control GPIO
+        from mode_manager import mode_manager
+        if hasattr(mode_manager, 'laser_control'):
+            mode_manager.laser_control.cleanup()
+            logging.info("Laser control cleaned up")
+    except Exception as e:
+        logging.warning(f"Error cleaning up laser: {e}")
+    
+    # Reset GPIO pins
+    cleanup_gpio()
+    
+    logging.info("Shutdown cleanup completed")
+
+
+def signal_handler(signum, frame):
+    """
+    Handle shutdown signals
+    """
+    logging.info(f"Received signal {signum}, shutting down gracefully...")
+    cleanup_resources()
+    sys.exit(0)
+
+
+@app.route('/api/service/restart', methods=['POST'])
+def restart_service():
+    """
+    Restart the nerdbot-flask service
+    """
+    try:
+        logging.info("Service restart requested via API")
+        
+        # Perform cleanup before restart
+        cleanup_resources()
+        
+        # Use subprocess to restart the service
+        result = subprocess.run(
+            ['sudo', 'systemctl', 'restart', 'nerdbot-flask'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode == 0:
+            return jsonify({
+                'message': 'Service restart initiated',
+                'status': 'success'
+            }), 200
+        else:
+            return jsonify({
+                'message': 'Service restart failed',
+                'error': result.stderr,
+                'status': 'error'
+            }), 500
+            
+    except subprocess.TimeoutExpired:
+        return jsonify({
+            'message': 'Service restart timed out',
+            'status': 'timeout'
+        }), 500
+    except Exception as e:
+        logging.error(f"Service restart failed: {e}")
+        return jsonify({
+            'message': f'Service restart failed: {e}',
+            'status': 'error'
+        }), 500
+
+
+@app.route('/api/service/stop', methods=['POST'])
+def stop_service():
+    """
+    Stop the nerdbot-flask service
+    """
+    try:
+        logging.info("Service stop requested via API")
+        
+        # Perform cleanup before stopping
+        cleanup_resources()
+        
+        # Use subprocess to stop the service
+        result = subprocess.run(
+            ['sudo', 'systemctl', 'stop', 'nerdbot-flask'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode == 0:
+            return jsonify({
+                'message': 'Service stop initiated',
+                'status': 'success'
+            }), 200
+        else:
+            return jsonify({
+                'message': 'Service stop failed',
+                'error': result.stderr,
+                'status': 'error'
+            }), 500
+            
+    except subprocess.TimeoutExpired:
+        return jsonify({
+            'message': 'Service stop timed out',
+            'status': 'timeout'
+        }), 500
+    except Exception as e:
+        logging.error(f"Service stop failed: {e}")
+        return jsonify({
+            'message': f'Service stop failed: {e}',
+            'status': 'error'
+        }), 500
+
+
+@app.route('/api/gpio/reset', methods=['POST'])
+def reset_gpio():
+    """
+    Reset GPIO pins (specifically GPIO 21 for laser)
+    """
+    try:
+        data = request.get_json() or {}
+        pin = data.get('pin', 21)
+        
+        logging.info(f"GPIO {pin} reset requested via API")
+        
+        # Reset the specified GPIO pin
+        import lgpio
+        chip = lgpio.gpiochip_open(0)
+        
+        try:
+            # Try to free the GPIO
+            lgpio.gpio_free(chip, pin)
+            logging.info(f"GPIO {pin} freed successfully")
+            success = True
+            message = f"GPIO {pin} reset successfully"
+        except Exception as e:
+            logging.warning(f"GPIO {pin} was not claimed or error freeing: {e}")
+            success = True  # Not an error if it wasn't claimed
+            message = f"GPIO {pin} reset (was not claimed)"
+        finally:
+            lgpio.gpiochip_close(chip)
+        
+        return jsonify({
+            'message': message,
+            'pin': pin,
+            'status': 'success' if success else 'error'
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"GPIO reset failed: {e}")
+        return jsonify({
+            'message': f'GPIO reset failed: {e}',
+            'status': 'error'
+        }), 500
+
+
+@app.route('/api/gpio/status', methods=['GET'])
+def gpio_status():
+    """
+    Get GPIO pin status
+    """
+    try:
+        pin = request.args.get('pin', 21, type=int)
+        
+        # Get GPIO status using gpioinfo
+        result = subprocess.run(
+            ['gpioinfo', 'gpiochip0'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        status_line = "GPIO not found"
+        for line in result.stdout.split('\n'):
+            if f"line {pin:>3}:" in line:
+                status_line = line.strip()
+                break
+        
+        return jsonify({
+            'pin': pin,
+            'status': status_line,
+            'raw_output': result.stdout
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"GPIO status check failed: {e}")
+        return jsonify({
+            'message': f'GPIO status check failed: {e}',
+            'status': 'error'
+        }), 500
+
+
 @app.route('/')
 def index():
     """
@@ -1709,6 +2196,11 @@ def index():
     """
     return render_template('index.html')
 
+
+# Register cleanup handlers
+atexit.register(cleanup_resources)
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
 
 if __name__ == '__main__':
     servos.reset_servos()

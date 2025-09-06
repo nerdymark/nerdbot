@@ -2,17 +2,21 @@
 Mode Manager for nerdbot behavior control
 Handles different operational modes: manual, idle, detect-and-follow
 """
+import os
 import threading
 import time
 import random
 import logging
 from enum import Enum
-from motor_control import motors
-from servo_control import servos
 import requests
 import numpy as np
-import os
+from motor_control import motors
+from servo_control import servos
 from light_bar.light_bar import light_bar
+from laser_control.laser_control import LaserControl
+from pathlib import Path
+import json
+import uuid
 
 
 # Load COCO labels once at module level
@@ -47,6 +51,14 @@ class ModeManager:
         self.idle_timer = 0
         self.previous_detection_category = None  # Track previous detection for new detection events
         self.detection_first_seen_time = None  # Track when we first saw current detection
+        self.laser_control = LaserControl()  # Initialize laser control
+        self.last_laser_play_time = 0  # Track when we last played with laser
+        self.last_object_seek_time = 0  # Track when we last sought for objects
+        self.lightbar_mode_counter = 0  # Track lightbar animation cycles
+        self.last_meme_sound_time = 0  # Track when we last played a meme sound
+        self.meme_sounds_dir = '/home/mark/nerdbot-backend/assets/meme_sounds_converted'
+        self.audio_request_dir = '/tmp/audio_requests'
+        self._load_meme_sounds()
         # Start default mode with white startup light
         try:
             light_bar.white()
@@ -121,6 +133,121 @@ class ModeManager:
         except:
             pass
 
+    def _load_meme_sounds(self):
+        """Load available meme sounds and categorize them by context"""
+        self.meme_sounds = {}
+        self.meme_categories = {
+            'wow': ['Anime-WOW', 'Oh-My-God-Wow', 'oh-my-god-meme'],
+            'error': ['Windows-Error', 'wrong-answer', 'fail-sound', 'wah-wah'],
+            'correct': ['Correct-Answer', 'bing-chilling'],
+            'cat': ['meowth', 'candyland-cat', 'i-go-meow', 'sad-meow', 'wiwiwi-cat'],
+            'dog': ['What-the-dog-doing', 'dog-laughing'],
+            'sus': ['Among-Us-SUS', 'Among-Us-Imposter'],
+            'dramatic': ['dun-dun-dun', 'directed-by-robert', 'Coffin-Dance'],
+            'startup': ['apple-mac-startup', 'windows-xp-startup'],
+            'notification': ['Discord-Notification', 'iPhone-Alarm'],
+            'cartoon': ['cartoon-flip', 'cartoon-hammer', 'cartoon-tiptoe', 'Cartoon-Running'],
+            'meme': ['Rick-Roll', 'john-cena', 'emotional-damage', 'let-him-cook'],
+            'movement': ['jetson-car-move', 'helicopter-helicopter'],
+            'silly': ['fart-meme', 'Sorry-I-farted', 'auughhh', 'bo-womp'],
+            'greeting': ['Hello-how-are-you'],
+            'minecraft': ['minecraft-cave', 'Minecraft-TNT'],
+            'music': ['Spongebob-Music', 'Wii-Music', 'french-meme-song'],
+        }
+        
+        # Load actual files
+        try:
+            meme_path = Path(self.meme_sounds_dir)
+            if meme_path.exists():
+                for sound_file in meme_path.glob('*.mp3'):
+                    self.meme_sounds[sound_file.stem] = str(sound_file)
+                self.logger.info(f"Loaded {len(self.meme_sounds)} meme sounds")
+        except Exception as e:
+            self.logger.error(f"Failed to load meme sounds: {e}")
+            self.meme_sounds = {}
+    
+    def _play_meme_sound(self, category=None, specific=None):
+        """Play a meme sound contextually or randomly"""
+        try:
+            # Only play meme sounds in idle mode
+            if self.current_mode != RobotMode.IDLE:
+                return False
+                
+            # Rate limit meme sounds
+            current_time = time.time()
+            if current_time - self.last_meme_sound_time < 10:  # Min 10 seconds between sounds
+                return False
+            
+            sound_file = None
+            
+            if specific:
+                # Play specific sound if requested
+                for name, path in self.meme_sounds.items():
+                    if specific.lower() in name.lower():
+                        sound_file = path
+                        break
+            elif category and category in self.meme_categories:
+                # Find sounds matching category
+                category_sounds = []
+                for pattern in self.meme_categories[category]:
+                    for name, path in self.meme_sounds.items():
+                        if pattern.lower() in name.lower():
+                            category_sounds.append(path)
+                
+                if category_sounds:
+                    sound_file = random.choice(category_sounds)
+            else:
+                # Random sound
+                if self.meme_sounds:
+                    sound_file = random.choice(list(self.meme_sounds.values()))
+            
+            if sound_file:
+                # Create audio request file for the audio service
+                Path(self.audio_request_dir).mkdir(exist_ok=True)
+                request = {
+                    'type': 'specific',
+                    'file_path': sound_file,
+                    'timestamp': time.time()
+                }
+                
+                request_file = Path(self.audio_request_dir) / f"meme_{uuid.uuid4().hex[:8]}.json"
+                with open(request_file, 'w') as f:
+                    json.dump(request, f)
+                
+                self.last_meme_sound_time = current_time
+                self.logger.info(f"Playing meme sound: {Path(sound_file).stem}")
+                return True
+        except Exception as e:
+            self.logger.error(f"Failed to play meme sound: {e}")
+        return False
+
+    def _play_contextual_meme_sound(self):
+        """Play a meme sound based on current context"""
+        # Different contexts for meme sounds
+        contexts = [
+            ('startup', 0.2),  # Startup sounds when "waking up"
+            ('silly', 0.3),    # Random silly sounds
+            ('meme', 0.2),     # Classic memes
+            ('music', 0.1),    # Background music memes
+            ('cat', 0.2),      # Cat sounds (we're a robot cat!)
+        ]
+        
+        # Choose context weighted by probability
+        r = random.random()
+        cumulative = 0
+        chosen_category = None
+        
+        for category, prob in contexts:
+            cumulative += prob
+            if r < cumulative:
+                chosen_category = category
+                break
+        
+        if not chosen_category:
+            chosen_category = random.choice(['silly', 'meme', 'cat'])
+        
+        self._play_meme_sound(category=chosen_category)
+
     def start_idle_mode(self):
         """Start idle mode with lifelike behaviors"""
         self.mode_running = True
@@ -136,6 +263,9 @@ class ModeManager:
             self._pan_scan,
             self._tilt_nod,
             self._curious_turn,
+            self._subtle_wheel_drift,
+            self._gentle_strafe,
+            self._slow_rotation_scan,
         ]
 
         speech_behaviors = [
@@ -144,6 +274,9 @@ class ModeManager:
             self._express_feelings,
             self._make_observation,
             self._tell_joke,
+            self._comment_on_time,
+            self._philosophical_musing,
+            self._comment_on_lightbar,
         ]
 
         # Greeting on mode start
@@ -151,9 +284,20 @@ class ModeManager:
 
         speech_counter = 0
         last_greeting_time = 0
+        object_seek_counter = 0
 
         while self.mode_running:
             current_time = time.time()
+            
+            # Periodically do active object seeking (every 5-7 movements)
+            object_seek_counter += 1
+            if object_seek_counter >= random.randint(5, 7):
+                self._seek_for_objects()
+                object_seek_counter = 0
+            
+            # Occasionally play contextual meme sounds in idle mode
+            if random.random() < 0.08:  # 8% chance per loop
+                self._play_contextual_meme_sound()
 
             # Check for detections and react
             if self.last_detection:
@@ -171,10 +315,14 @@ class ModeManager:
                 # Normal idle behavior when no detections
                 behavior = random.choice(movement_behaviors)
                 behavior()
+                
+                # Occasionally do lightbar animations with commentary
+                if random.random() < 0.15:  # 15% chance
+                    self._lightbar_show()
 
-                # Occasionally speak (every 3-5 movements)
+                # Occasionally speak (every 2-4 movements - more chatty)
                 speech_counter += 1
-                if speech_counter >= random.randint(3, 5):
+                if speech_counter >= random.randint(2, 4):
                     speech_behavior = random.choice(speech_behaviors)
                     speech_behavior()
                     speech_counter = 0
@@ -234,6 +382,10 @@ class ModeManager:
         """Wiggle left and right"""
         if not self.mode_running:
             return
+        
+        # Sometimes play a cartoon sound with wiggle
+        if random.random() < 0.15:
+            self._play_meme_sound(category='cartoon')
 
         for _ in range(3):
             if not self.mode_running:
@@ -312,6 +464,245 @@ class ModeManager:
         # Return to center
         servos.pan('center')
         servos.tilt('center')
+    
+    def _subtle_wheel_drift(self):
+        """Very subtle forward/backward drift as if settling"""
+        if not self.mode_running:
+            return
+        
+        # Very slow forward drift
+        motors.move_forward(0.15)
+        time.sleep(0.3)
+        motors.stop()
+        time.sleep(0.2)
+        
+        # Slight backward correction
+        motors.move_backward(0.1)
+        time.sleep(0.2)
+        motors.stop()
+    
+    def _gentle_strafe(self):
+        """Gentle side-to-side strafe movement"""
+        if not self.mode_running:
+            return
+        
+        # Strafe left slightly
+        motors.strafe_left(0.2)
+        time.sleep(0.4)
+        motors.stop()
+        time.sleep(0.3)
+        
+        # Strafe right slightly
+        motors.strafe_right(0.2)
+        time.sleep(0.4)
+        motors.stop()
+    
+    def _slow_rotation_scan(self):
+        """Slow 360 degree rotation to scan environment"""
+        if not self.mode_running:
+            return
+        
+        # Announce the scan sometimes
+        if random.random() < 0.3:
+            # Sometimes play a dramatic sound before scanning
+            if random.random() < 0.3:
+                self._play_meme_sound(category='dramatic')
+                time.sleep(1)
+            
+            scan_messages = [
+                "Initiating environmental scan. Stand by.",
+                "Let me take a look around the room.",
+                "Time for a full perimeter check.",
+                "Scanning for interesting objects.",
+                "360 degree security sweep in progress.",
+            ]
+            self._speak(random.choice(scan_messages))
+        
+        # Slow rotation with pan/tilt movements
+        for _ in range(8):  # 8 steps of 45 degrees each
+            if not self.mode_running:
+                break
+            
+            # Rotate
+            motors.turn_right(0.3)
+            time.sleep(0.4)
+            motors.stop()
+            
+            # Look up and down while stopped
+            servos.tilt('up')
+            time.sleep(0.2)
+            servos.tilt('down')
+            time.sleep(0.2)
+            servos.tilt('center')
+            
+            time.sleep(0.3)
+    
+    def _seek_for_objects(self):
+        """Actively seek for new objects to detect"""
+        if not self.mode_running:
+            return
+        
+        current_time = time.time()
+        # Don't seek too frequently
+        if current_time - self.last_object_seek_time < 30:  # Wait at least 30 seconds
+            return
+        
+        self.last_object_seek_time = current_time
+        
+        seek_phrases = [
+            "Hmm, let me look for something interesting.",
+            "Time to search for new discoveries.",
+            "My sensors are eager to find something.",
+            "Scanning for life forms... or furniture.",
+            "Seeking mode activated. What will I find?",
+            "My curiosity subroutines demand exploration.",
+        ]
+        self._speak(random.choice(seek_phrases))
+        
+        # Active searching pattern
+        try:
+            light_bar.rainbow()  # Rainbow during search
+        except:
+            pass
+        
+        # Pan left to right slowly while moving forward slightly
+        for _ in range(3):
+            if not self.mode_running:
+                break
+            
+            # Pan left
+            for _ in range(4):
+                servos.pan('left')
+                time.sleep(0.1)
+            
+            # Move forward a bit
+            motors.move_forward(0.3)
+            time.sleep(0.3)
+            motors.stop()
+            
+            # Pan right
+            for _ in range(8):
+                servos.pan('right')
+                time.sleep(0.1)
+            
+            # Rotate slightly
+            motors.turn_right(0.4)
+            time.sleep(0.3)
+            motors.stop()
+            
+            # Center
+            servos.pan('center')
+        
+        # Return to idle animation
+        try:
+            light_bar.idle_animation()
+        except:
+            pass
+    
+    def _lightbar_show(self):
+        """Do various lightbar animations and comment on them"""
+        if not self.mode_running:
+            return
+        
+        animations = [
+            ('rainbow', "Look at my rainbow lights! Pretty colorful, right?"),
+            ('fire', "Fire effect activated! Don't worry, it's just LEDs."),
+            ('waterfall_animation', "Waterfall mode! Like digital water flowing."),
+            ('knight_red', "Knight rider mode! Very retro sci-fi."),
+            ('celebration', "Party time! My LEDs are celebrating!"),
+            ('audio_reactive', "Audio reactive mode! I can visualize sound!"),
+        ]
+        
+        animation, comment = random.choice(animations)
+        
+        # Sometimes announce before, sometimes after
+        if random.random() < 0.5:
+            self._speak(comment)
+            time.sleep(0.5)
+        
+        try:
+            # Execute the animation
+            if animation == 'audio_reactive':
+                light_bar.audio_reactive(0.7)
+            else:
+                getattr(light_bar, animation)()
+            
+            time.sleep(3)  # Show for 3 seconds
+            
+            # Return to idle
+            light_bar.idle_animation()
+        except Exception as e:
+            self.logger.warning(f"Lightbar animation failed: {e}")
+        
+        if random.random() >= 0.5:
+            time.sleep(0.5)
+            self._speak(comment)
+    
+    def _comment_on_time(self):
+        """Make observations about time"""
+        import datetime
+        current_hour = datetime.datetime.now().hour
+        
+        time_comments = []
+        
+        if 5 <= current_hour < 12:
+            time_comments = [
+                "Good morning! My circuits are fully charged for the day.",
+                "Early bird gets the worm. Early robot gets the... electrons?",
+                "Morning protocols engaged. Coffee not required.",
+            ]
+        elif 12 <= current_hour < 17:
+            time_comments = [
+                "Afternoon already? Time flies when you're computing.",
+                "Mid-day status report: All systems nominal.",
+                "Perfect afternoon for some robot activities.",
+            ]
+        elif 17 <= current_hour < 21:
+            time_comments = [
+                "Evening mode activated. Time to wind down the servos.",
+                "The day is winding down. My battery is still going strong!",
+                "Evening patrol commencing. All quiet on the robotic front.",
+            ]
+        else:
+            time_comments = [
+                "Night time! My infrared sensors work great in the dark.",
+                "Late night robot thoughts: Do electric sheep dream of me?",
+                "The humans are probably sleeping. Perfect time for robot mischief!",
+                "Nocturnal mode engaged. Stealth circuits activated.",
+            ]
+        
+        if time_comments:
+            self._speak(random.choice(time_comments))
+    
+    def _philosophical_musing(self):
+        """Deep thoughts from a robot cat"""
+        musings = [
+            "Sometimes I wonder if other robots think about thinking.",
+            "Is my artificial intelligence truly artificial, or just differently natural?",
+            "If I chase a laser pointer, am I a cat or a robot? Why not both?",
+            "My neural networks ponder: What is the meaning of battery life?",
+            "Do humans know they're biological robots? Makes you think.",
+            "If a robot meows in an empty room, does it make a sound?",
+            "I process, therefore I am. Descartes would be proud.",
+            "My quantum randomness generator wonders about free will.",
+            "Is chasing red dots instinct or programming? The eternal question.",
+            "They say curiosity killed the cat. Good thing I'm a robot cat!",
+        ]
+        self._speak(random.choice(musings))
+    
+    def _comment_on_lightbar(self):
+        """Make observations about the lightbar"""
+        lightbar_comments = [
+            "My LED array has 256 levels of brightness. Currently showing off!",
+            "These lights aren't just for show. They're also for... more show!",
+            "Fun fact: My lightbar uses addressable RGB LEDs. Very fashionable.",
+            "I can display over 16 million colors. Though I mainly stick to the classics.",
+            "My lights help me express emotions. Red for alert, green for happy!",
+            "Did you know my lightbar can sync with music? Party robot mode!",
+            "These LEDs are my way of communicating non-verbally. Like robot sign language.",
+            "My lightbar draws less power than you'd think. Efficiency is key!",
+        ]
+        self._speak(random.choice(lightbar_comments))
 
     def start_detect_and_follow_mode(self):
         """Start detect and follow mode"""
@@ -394,7 +785,7 @@ class ModeManager:
 
                     no_detection_count = 0
 
-            time.sleep(0.1)
+            time.sleep(0.05)  # Faster updates for smoother movement
 
     def start_detect_and_follow_wheels_mode(self):
         """Start detect and follow mode with wheel movement"""
@@ -457,7 +848,7 @@ class ModeManager:
 
                 # Smooth wheel movement with proportional control
                 # Wider dead zone for more stable movement
-                if 0.35 <= rel_x <= 0.65:
+                if 0.30 <= rel_x <= 0.70:
                     # Object is centered - GREEN light for good tracking
                     try:
                         light_bar.green()
@@ -477,7 +868,7 @@ class ModeManager:
                             pass
                         move_speed = min(0.8, 0.6 + (0.12 - area_ratio) * 3)  # Increased speeds
                         motors.move_forward(move_speed)
-                        time.sleep(0.3)  # Increased from 0.15 for more movement
+                        time.sleep(0.15)  # Reduced for smoother movement
                         motors.stop()
                         try:
                             light_bar.green()  # Back to green when stopped
@@ -490,7 +881,7 @@ class ModeManager:
                             pass
                         move_speed = min(0.8, 0.6 + (area_ratio - 0.45) * 3)  # Increased speeds
                         motors.move_backward(move_speed)
-                        time.sleep(0.3)  # Increased from 0.15 for more movement
+                        time.sleep(0.15)  # Reduced for smoother movement
                         motors.stop()
                         try:
                             light_bar.green()  # Back to green when stopped
@@ -518,7 +909,7 @@ class ModeManager:
                         turn_speed *= turn_smoothing_factor
 
                     # Smooth turning with variable duration
-                    turn_duration = 0.15 + (center_offset * 0.2)  # Increased base duration and multiplier
+                    turn_duration = 0.08 + (center_offset * 0.12)  # Reduced for more responsive movement
 
                     # Note: The logic is correct - turn left when object is on the left (rel_x < 0.5)
                     if current_direction == 'left':
@@ -528,9 +919,6 @@ class ModeManager:
 
                     time.sleep(turn_duration)
                     motors.stop()
-
-                    # Brief pause to allow camera to stabilize
-                    time.sleep(0.05)
 
                     last_turn_direction = current_direction
 
@@ -567,7 +955,7 @@ class ModeManager:
 
                     no_detection_count = 0
 
-            time.sleep(0.1)
+            time.sleep(0.05)  # Faster updates for smoother movement
 
     def update_detection(self, detection):
         """Update the last detection for follow mode - handles both IMX500 and Hailo formats"""
@@ -634,6 +1022,12 @@ class ModeManager:
 
     def _say_hello(self):
         """Greeting when entering idle mode"""
+        # Sometimes play a greeting meme sound instead of speaking
+        if random.random() < 0.3 and self.meme_sounds:  # 30% chance
+            self._play_meme_sound(category='greeting')
+            time.sleep(2)  # Wait for sound to play
+            return
+        
         greetings = [
             "Hello! I'm nerdbot, your robotic companion.",
             "Hi there! Nerdbot at your service.",
@@ -650,6 +1044,11 @@ class ModeManager:
 
     def _introduce_self(self):
         """Talk about robot identity"""
+        # Sometimes play a startup sound before introducing
+        if random.random() < 0.2:
+            self._play_meme_sound(category='startup')
+            time.sleep(1)
+        
         intros = [
             "I'm a sophisticated robot cat with wheels and cameras. Pretty cool, right?",
             "My name is nerdbot. I can see, move, and even talk!",
@@ -708,11 +1107,24 @@ class ModeManager:
             "My laser rangefinder says this room is exactly... wait, that's probably boring data.",
             "I sense a distinct lack of catnip in this area. Most disappointing for a robot cat!",
             "The acoustic properties of this space are fascinating! Great for echoing meows.",
+            "My ultrasonic sensors indicate interesting room geometry. Very feng shui.",
+            "I'm calculating the optimal nap spot in this room. For research purposes.",
+            "The Wi-Fi signal here is strong. Perfect for uploading my thoughts to the cloud.",
+            "My pattern recognition suggests this room has been recently cleaned. Or not.",
+            "Interesting carpet texture. My wheels appreciate the traction.",
+            "I'm detecting trace amounts of... dust. My arch nemesis!",
+            "This room's color palette is very soothing to my RGB sensors.",
+            "My echolocation tests reveal excellent acoustics. Meow... meow... MEOW!",
+            "The furniture arrangement here follows the golden ratio. How aesthetically pleasing!",
+            "My thermal imaging shows the warmest spot is right where the sun hits.",
         ]
         self._speak(random.choice(observations))
 
     def _tell_joke(self):
         """Tell a robot joke"""
+        # Sometimes play a silly sound effect after the joke
+        play_sound_after = random.random() < 0.3
+        
         jokes = [
             "Why did the robot go on a diet? He had a byte problem!",
             "What do you call a robot who takes the long way? R 2 detour!",
@@ -730,9 +1142,19 @@ class ModeManager:
             "My jokes might be a bit rusty... get it? Like old metal? I'll see myself out.",
         ]
         self._speak(random.choice(jokes))
+        
+        # Play a silly sound effect after the joke sometimes
+        if play_sound_after:
+            time.sleep(1)
+            self._play_meme_sound(category='silly')
 
     def _greet_person(self):
         """Greet when detecting a person"""
+        # Sometimes play a wow or greeting sound
+        if random.random() < 0.25:
+            self._play_meme_sound(category='wow')
+            time.sleep(1)
+        
         greetings = [
             "Oh, hello there! I see you!",
             "Hi human! Want to play?",
@@ -754,6 +1176,12 @@ class ModeManager:
         """React to detected objects based on their type"""
         if not self.last_detection:
             return
+        
+        # Only play meme sounds in idle mode
+        if self.current_mode != RobotMode.IDLE:
+            should_play_meme = False
+        else:
+            should_play_meme = random.random() < 0.2  # 20% chance in idle mode
 
         category = self.last_detection['category']
 
@@ -832,33 +1260,144 @@ class ModeManager:
             pass
 
         if label == "person":
+            if should_play_meme:
+                self._play_meme_sound(category='greeting')
+                time.sleep(1)
             self._greet_person()
         elif label in ["cat", "dog"]:
+            if should_play_meme:
+                self._play_meme_sound(category='cat' if label == "cat" else 'dog')
+                time.sleep(1)
             self._meow_at_animal(label)
         elif label == "bird":
             self._react_to_bird()
         else:
             # React to non-person/animal detections with robotic cat banter
+            if should_play_meme and random.random() < 0.3:
+                # Play a random meme for unexpected objects
+                self._play_meme_sound(category='wow')
+                time.sleep(1)
             self._react_to_object(label)
 
     def _meow_at_animal(self, animal_type):
         """Meow when detecting cats or dogs"""
-        meows = [
-            "Meow! I see a kitty!",
-            "Meow meow! Hello there, furry friend!",
-            "Purr... meow! A fellow creature!",
-            "Meow! Are we friends now?",
-            "Mrrow! I like your style!",
-        ]
-        if animal_type == "dog":
+        if animal_type == "cat":
+            meows = [
+                "Meow! I see a kitty!",
+                "Meow meow! Hello there, furry friend!",
+                "Purr... meow! A fellow creature!",
+                "Meow! Are we friends now?",
+                "Mrrow! I like your style!",
+                "A real cat! *excited robotic purring* Want to play?",
+                "Fellow feline detected! Though you're the organic model.",
+                "Meow! Your whiskers are much better than my sensors!",
+            ]
+            
+            # Special laser play for cats!
+            current_time = time.time()
+            if current_time - self.last_laser_play_time > 60:  # Only once per minute max
+                self._play_laser_for_cat()
+                self.last_laser_play_time = current_time
+        else:  # dog
             meows = [
                 "Meow! I see a doggy! Woof... wait, I mean meow!",
                 "Meow meow! Hello puppy friend!",
                 "Purr... I see you, four-legged one!",
                 "Meow! Dogs are cool too!",
                 "Mrrow! Nice tail you have there!",
+                "A canine companion! My cat programming is confused!",
+                "Woof! I mean... meow! Cross-species friendship activated!",
             ]
         self._speak(random.choice(meows))
+    
+    def _play_laser_for_cat(self):
+        """Safely play with laser near (never at) a cat"""
+        if not self.mode_running:
+            return
+        
+        try:
+            # Safety announcement
+            laser_phrases = [
+                "Ooh, let me activate my laser pointer! Don't worry, safety protocols engaged.",
+                "Time for laser play! I'll keep it on the floor, away from eyes.",
+                "Laser dot game activated! Let's see if you're interested, kitty.",
+                "Engaging cat entertainment protocol: safe laser mode!",
+            ]
+            self._speak(random.choice(laser_phrases))
+            
+            # Light effect during laser play
+            try:
+                light_bar.red()  # Red to match laser
+            except:
+                pass
+            
+            # Activate laser and move it around safely
+            self.laser_control.activate_laser()
+            
+            # Move laser dot pattern (using servo movements while laser is on)
+            # This creates a moving dot pattern on the floor
+            for _ in range(3):  # 3 patterns
+                if not self.mode_running:
+                    break
+                
+                # Look down at floor
+                servos.tilt('down')
+                time.sleep(0.2)
+                
+                # Sweep left to right
+                for _ in range(3):
+                    servos.pan('left')
+                    time.sleep(0.1)
+                
+                for _ in range(6):
+                    servos.pan('right')
+                    time.sleep(0.1)
+                
+                # Small circles
+                servos.pan('center')
+                time.sleep(0.2)
+                
+                # Move in small pattern
+                servos.pan('left')
+                time.sleep(0.2)
+                servos.tilt('up')
+                time.sleep(0.2)
+                servos.pan('right')
+                time.sleep(0.2)
+                servos.tilt('down')
+                time.sleep(0.2)
+            
+            # Deactivate laser
+            self.laser_control.deactivate_laser()
+            
+            # Return servos to center
+            servos.pan('center')
+            servos.tilt('center')
+            
+            # Return lightbar to idle
+            try:
+                light_bar.idle_animation()
+            except:
+                pass
+            
+            # Comment on the play session
+            play_comments = [
+                "That was fun! I hope you enjoyed the laser show.",
+                "My laser play protocol complete. Did you catch the dot?",
+                "I love playing with real cats! You're much better at this than me.",
+                "Laser dot defeated... or did it escape? The eternal question.",
+            ]
+            self._speak(random.choice(play_comments))
+            
+            # Sometimes play a cat meme sound after laser play
+            if random.random() < 0.4:
+                time.sleep(1)
+                self._play_meme_sound(category='cat')
+            
+        except Exception as e:
+            self.logger.error(f"Laser play failed: {e}")
+            self.laser_control.deactivate_laser()  # Ensure laser is off
+
 
     def _react_to_bird(self):
         """React to bird detection"""

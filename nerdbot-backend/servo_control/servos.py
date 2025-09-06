@@ -60,6 +60,9 @@ def tilt(direction):
     elif direction == 'down':
         new_angle = min(180, current_angle + 2)  # Clamp to maximum 180
         tilt_servo.angle = new_angle
+    elif direction == 'center' or direction == 'forward':
+        # Set tilt to forward position (don't affect pan)
+        tilt_servo.angle = tilt_dict['forward']
     return tilt_servo.angle
 
 
@@ -76,7 +79,8 @@ def pan(direction):
         new_angle = min(180, current_angle + 2)  # Clamp to maximum 180
         pan_servo.angle = new_angle
     elif direction == 'center':
-        reset_servos()
+        # Only center pan servo, don't reset tilt
+        pan_servo.angle = pan_dict['center']
     return pan_servo.angle
 
 
@@ -165,6 +169,19 @@ def joystick_servo_handler(action, **kwargs):
             tilt(direction)
     elif action == 'center':
         reset_servos()
+    elif action == 'pan_center':
+        # Only center pan, don't affect tilt tracking
+        pan('center')
+
+
+def get_current_angles():
+    """
+    Get current servo angles
+    """
+    return {
+        'pan': pan_servo.angle,
+        'tilt': tilt_servo.angle
+    }
 
 
 def enable_joystick_control():

@@ -19,27 +19,23 @@ class OptimizedTracker:
         self.frame_height = frame_height
         
         # Dead zone parameters (pixels) - increased for more locked-in tracking
-        self.dead_zone_x = 80  # Horizontal dead zone (doubled)
-        self.dead_zone_y = 60  # Vertical dead zone (doubled)
+        self.dead_zone_x = 60  # Horizontal dead zone (reduced for more responsive tracking)
+        self.dead_zone_y = 45  # Vertical dead zone (reduced for more responsive tracking)
         
-        # Speed parameters - reduced for smoother movement
-        self.max_speed_pan = 2.0    # Max degrees per update (reduced further)
-        self.max_speed_tilt = 1.5   # Max degrees per update (reduced further)
+        # Speed parameters - optimized for smoother movement
+        self.max_speed_pan = 1.5    # Max degrees per update (smoother)
+        self.max_speed_tilt = 1.0   # Max degrees per update (smoother)
         
-        # Proportional gains - reduced for less aggressive tracking
-        self.kp_pan = 0.01    # Horizontal proportional gain (halved)
-        self.kp_tilt = 0.008  # Vertical proportional gain (reduced)
+        # Proportional gains - optimized for smooth tracking
+        self.kp_pan = 0.008   # Horizontal proportional gain (reduced)
+        self.kp_tilt = 0.006  # Vertical proportional gain (reduced)
         
         # Center of frame
         self.center_x = frame_width // 2
         self.center_y = frame_height // 2
         
-        # Current servo positions
-        self.current_pan = 90
-        self.current_tilt = 150
-        
-        # Smoothing parameters - increased for more stable tracking
-        self.smooth_factor = 0.8  # How much to blend with previous position
+        # Smoothing parameters - optimized for stable tracking
+        self.smooth_factor = 0.85  # How much to blend with previous position (increased)
         self.last_error_x = 0
         self.last_error_y = 0
         
@@ -97,9 +93,19 @@ class OptimizedTracker:
         pan_delta = max(-self.max_speed_pan, min(self.max_speed_pan, pan_delta))
         tilt_delta = max(-self.max_speed_tilt, min(self.max_speed_tilt, tilt_delta))
         
+        # Get current actual servo positions
+        try:
+            current_angles = self.servos.get_current_angles()
+            current_pan = current_angles['pan']
+            current_tilt = current_angles['tilt']
+        except:
+            # Fallback to defaults if servo reading fails
+            current_pan = 90
+            current_tilt = 150
+        
         # Calculate new positions
-        new_pan = self.current_pan + pan_delta
-        new_tilt = self.current_tilt + tilt_delta
+        new_pan = current_pan + pan_delta
+        new_tilt = current_tilt + tilt_delta
         
         # Apply servo limits
         new_pan = max(0, min(180, new_pan))
@@ -109,13 +115,11 @@ class OptimizedTracker:
         # Move servos
         try:
             self.servos.pan_to(new_pan)
-            self.current_pan = new_pan
         except ValueError as e:
             logger.warning(f"Pan servo error: {e}")
             
         try:
             self.servos.tilt_to(new_tilt)
-            self.current_tilt = new_tilt
         except ValueError as e:
             logger.warning(f"Tilt servo error: {e}")
             
@@ -124,8 +128,7 @@ class OptimizedTracker:
     def reset(self):
         """Reset servos to center position"""
         self.servos.reset_servos()
-        self.current_pan = 90
-        self.current_tilt = 150  # Forward position
+        # Reset smoothing history
         self.last_error_x = 0
         self.last_error_y = 0
         

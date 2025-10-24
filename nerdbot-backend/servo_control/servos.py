@@ -19,9 +19,10 @@ laser_servo.set_pulse_width_range(900, 2600)
 
 # Dicts that adjust the servo angles to the correct values
 tilt_dict = {
-    'up': 90,
-    'forward': 150,
-    'backward': 0
+    'up': 60,           # Look up more (reduced from 90)
+    'forward': 150,     # Keep forward position the same
+    'down': 180,        # Look down more (new position)
+    'backward': 0       # Keep backward position
 }
 
 
@@ -55,10 +56,10 @@ def tilt(direction):
     current_angle = tilt_servo.angle
 
     if direction == 'up':
-        new_angle = max(0, current_angle - 2)  # Clamp to minimum 0
+        new_angle = max(60, current_angle - 3)  # Clamp to minimum 60 (up limit)
         tilt_servo.angle = new_angle
     elif direction == 'down':
-        new_angle = min(180, current_angle + 2)  # Clamp to maximum 180
+        new_angle = min(180, current_angle + 3)  # Clamp to maximum 180 (down limit)  
         tilt_servo.angle = new_angle
     elif direction == 'center' or direction == 'forward':
         # Set tilt to forward position (don't affect pan)

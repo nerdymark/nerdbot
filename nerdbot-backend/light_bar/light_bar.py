@@ -559,8 +559,27 @@ class LightBarManager:
         return getattr(self.controller, name)
 
 
+# Create global instance with monitoring
+def create_light_bar():
+    """Create and configure the light bar instance"""
+    lb = LightBarManager(use_wled=True)
+    if lb.use_wled and hasattr(lb.controller, 'set_rate_limit'):
+        # Configure WLED rate limiting
+        lb.controller.set_rate_limit(enabled=True, min_interval=0.1)
+        # Log queue status periodically for monitoring
+        def monitor_queue():
+            while True:
+                time.sleep(10)  # Check every 10 seconds
+                if hasattr(lb.controller, 'get_queue_status'):
+                    status = lb.controller.get_queue_status()
+                    if status['queue_size'] > 5:
+                        logger.warning(f"WLED queue building up: {status}")
+        monitor_thread = threading.Thread(target=monitor_queue, daemon=True)
+        monitor_thread.start()
+    return lb
+
 # Global light bar instance - defaults to WLED if available
-light_bar = LightBarManager(use_wled=True)
+light_bar = create_light_bar()
 
 
 def rainbow_cycle(delay: float = 0.1) -> bool:  # pylint: disable=unused-argument
@@ -688,14 +707,20 @@ def mapping() -> bool:
 def pixels(n: int) -> bool:
     """
     Light up first N unique pixels.
-    
+
     Args:
         n: Number of pixels to light up (1-8)
-        
+
     Returns:
         True if command sent successfully
     """
-    return light_bar.pixels(n)
+    # This function gets called frequently in tracking loops
+    # Add extra throttling
+    current_time = time.time()
+    if hasattr(pixels, '_last_call') and current_time - pixels._last_call < 0.1:
+        return True  # Throttle to max 10 calls per second
+    pixels._last_call = current_time
+    return light_bar.send_command(f"pixels {n}")
 
 
 # Auto-start on import if this is the main module

@@ -42,8 +42,8 @@ class RobotMode(Enum):
 
 
 class ModeManager:
-    def __init__(self):
-        self.current_mode = RobotMode.DETECT_AND_FOLLOW
+    def __init__(self, laser_control=None):
+        self.current_mode = RobotMode.MANUAL  # Default to MANUAL mode
         self.mode_thread = None
         self.mode_running = False
         self.logger = logging.getLogger(__name__)
@@ -51,7 +51,8 @@ class ModeManager:
         self.idle_timer = 0
         self.previous_detection_category = None  # Track previous detection for new detection events
         self.detection_first_seen_time = None  # Track when we first saw current detection
-        self.laser_control = LaserControl()  # Initialize laser control
+        # Use shared laser control instance to avoid GPIO conflicts
+        self.laser_control = laser_control if laser_control is not None else LaserControl()
         self.last_laser_play_time = 0  # Track when we last played with laser
         self.last_object_seek_time = 0  # Track when we last sought for objects
         self.lightbar_mode_counter = 0  # Track lightbar animation cycles
@@ -59,17 +60,22 @@ class ModeManager:
         self.meme_sounds_dir = '/home/mark/nerdbot-backend/assets/meme_sounds_converted'
         self.audio_request_dir = '/tmp/audio_requests'
         self._load_meme_sounds()
+
+        # TTS overlap prevention
+        self.tts_end_time = 0
+        self.tts_lock = threading.Lock()
         # Start default mode with white startup light
         try:
             light_bar.white()
             time.sleep(0.5)
             light_bar.test()  # Run test sequence on startup
             time.sleep(1)
+            light_bar.clear()  # Clear lights for manual mode
         except:
             pass
-        self.start_detect_and_follow_mode()
+        # Don't start any mode thread - manual mode doesn't need one
 
-    def set_mode(self, mode):
+    def set_mode(self, mode, announce=True):
         """Switch to a different operational mode"""
         self.logger.info(f"Switching from {self.current_mode.value} to {mode}")
 
@@ -115,11 +121,35 @@ class ModeManager:
             self.logger.error(f"Unknown mode: {mode}")
             return False
 
+        # Announce the mode change via TTS
+        if announce:
+            mode_announcements = {
+                'manual': "Manual mode activated. I'm ready for your commands.",
+                'idle': "Idle mode engaged. Time for some robotic cat shenanigans!",
+                'detect_and_follow': "Detect and follow mode active. I'll track objects with my camera only.",
+                'detect_and_follow_wheels': "Full detect and follow mode enabled. I'll track and chase objects!"
+            }
+
+            announcement = mode_announcements.get(mode, f"{mode} mode activated.")
+            self._speak(announcement)
+
         return True
 
     def get_mode(self):
         """Get current operational mode"""
         return self.current_mode.value
+
+    def cycle_mode(self):
+        """Cycle through available robot modes and announce via TTS"""
+        modes = [RobotMode.MANUAL, RobotMode.IDLE, RobotMode.DETECT_AND_FOLLOW, RobotMode.DETECT_AND_FOLLOW_WHEELS]
+        current_index = modes.index(self.current_mode)
+        next_index = (current_index + 1) % len(modes)
+        next_mode = modes[next_index]
+
+        # set_mode now handles TTS announcement by default
+        success = self.set_mode(next_mode.value, announce=True)
+
+        return success
 
     def stop_current_mode(self):
         """Stop any running mode thread"""
@@ -776,14 +806,15 @@ class ModeManager:
                         light_bar.knight_red()  # Knight rider for active search
                     except:
                         pass
-                    
-                    servos.pan('left')
-                    time.sleep(0.5)
-                    servos.pan('right')
-                    time.sleep(0.5)
-                    servos.pan('center')
 
-                    no_detection_count = 0
+                    # DISABLED: Let optimized tracker handle pan/tilt movement
+                    # servos.pan('left')
+                    # time.sleep(0.5)
+                    # servos.pan('right')
+                    # time.sleep(0.5)
+                    # servos.pan('center')
+
+                    no_detection_count = 0  # Reset without search pattern
 
             time.sleep(0.05)  # Faster updates for smoother movement
 
@@ -992,33 +1023,78 @@ class ModeManager:
             self.last_detection = None
 
     def _speak(self, text):
-        """Send text to TTS API with light bar animation"""
-        try:
-            # Start speech animation on light bar
+        """Send text to TTS API with overlap prevention and improved error handling"""
+        # Pre-validate text
+        if not text or not isinstance(text, str) or len(text.strip()) == 0:
+            self.logger.warning(f"_speak called with invalid text: '{text}'")
+            return
+
+        # Sanitize text early to detect potential issues
+        import re
+        sanitized = re.sub(r'[^A-Za-z0-9\s\.,\'\"\-\?\!\(\)\:\;]', '', text).strip()
+        if len(sanitized) < 2:
+            self.logger.warning(f"Text too short after sanitization: '{text}' -> '{sanitized}'")
+            return
+
+        with self.tts_lock:
             try:
-                light_bar.speech_animation()
-            except:
-                pass
-            
-            response = requests.post(
-                f'http://localhost:5000/api/tts/{text}',
-                headers={'Content-Type': 'application/json'}
-            )
-            if response.ok:
-                self.logger.info(f"Speaking: {text}")
-                # Keep speech animation running for a bit
-                time.sleep(0.5)
-            
-            # Return to idle animation after speaking
-            try:
-                if self.current_mode == RobotMode.IDLE:
-                    light_bar.idle_animation()
+                # Wait for previous TTS to finish if needed
+                current_time = time.time()
+                if self.tts_end_time > current_time:
+                    wait_time = self.tts_end_time - current_time
+                    self.logger.info(f"Waiting {wait_time:.1f}s for previous TTS to finish")
+                    time.sleep(wait_time)
+
+                # Estimate duration of this speech
+                # Rough estimate: ~150 words per minute, 5 chars per word = 12.5 chars/sec
+                chars_per_second = 10  # Conservative
+                estimated_duration = len(sanitized) / chars_per_second + 1.5  # Add buffer
+                estimated_duration = max(2.0, estimated_duration)  # Min 2 seconds
+                
+                # Start speech animation on light bar
+                try:
+                    light_bar.speech_animation()
+                except:
+                    pass
+                
+                # URL encode the text to handle special characters
+                from urllib.parse import quote
+                encoded_text = quote(text)
+
+                response = requests.post(
+                    f'http://localhost:5000/api/tts/{encoded_text}',
+                    headers={'Content-Type': 'application/json'},
+                    timeout=estimated_duration + 10  # Add timeout buffer
+                )
+
+                if response.ok:
+                    self.logger.info(f"Speaking: {text[:50]}{'...' if len(text) > 50 else ''} (est. {estimated_duration:.1f}s)")
+                    # Set when this TTS will end
+                    self.tts_end_time = time.time() + estimated_duration
                 else:
-                    light_bar.clear()
-            except:
-                pass
-        except Exception as e:
-            self.logger.error(f"Failed to speak: {e}")
+                    self.logger.error(f"TTS API failed: {response.status_code} - {response.text[:100]}")
+                    return  # Don't schedule light restoration if TTS failed
+                    
+                    # Schedule light bar restoration after speech
+                    def restore_lights():
+                        time.sleep(estimated_duration)
+                        try:
+                            if self.current_mode == RobotMode.IDLE:
+                                light_bar.idle_animation()
+                            else:
+                                light_bar.clear()
+                        except:
+                            pass
+                    threading.Thread(target=restore_lights, daemon=True).start()
+                
+            except requests.exceptions.Timeout:
+                self.logger.error(f"TTS request timeout for text: {text[:50]}")
+            except requests.exceptions.ConnectionError:
+                self.logger.error("TTS service unavailable")
+            except Exception as e:
+                self.logger.error(f"Failed to speak '{text[:50]}': {e}")
+                # Reset TTS lock state on error
+                self.tts_end_time = 0
 
     def _say_hello(self):
         """Greeting when entering idle mode"""
@@ -1656,5 +1732,26 @@ class ModeManager:
             time.sleep(0.1)
 
 
-# Global instance
-mode_manager = ModeManager()
+# Global instance - will be initialized in server.py with shared laser control
+mode_manager = None
+
+# Fallback initialization function for when server.py initialization fails
+def get_or_create_mode_manager():
+    global mode_manager
+    if mode_manager is None:
+        try:
+            # Try to initialize with laser control
+            from laser_control.laser_control import LaserControl
+            laser_control = LaserControl()
+            mode_manager = ModeManager(laser_control)
+            logging.info("Mode manager fallback initialization successful")
+        except Exception as e:
+            logging.warning(f"Fallback mode manager initialization failed: {e}")
+            # Try without laser control
+            try:
+                mode_manager = ModeManager(None)
+                logging.info("Mode manager initialized without laser control")
+            except Exception as e2:
+                logging.error(f"Mode manager initialization completely failed: {e2}")
+                return None
+    return mode_manager

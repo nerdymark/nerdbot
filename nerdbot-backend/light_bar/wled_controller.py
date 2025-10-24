@@ -11,6 +11,8 @@ import threading
 from typing import Optional, Dict, Any, Tuple, List
 from enum import Enum
 import random
+from collections import deque
+from threading import Lock, Thread
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -283,7 +285,7 @@ class WLEDController:
     def __init__(self, host: str = "http://10.0.1.166", timeout: float = 2.0):
         """
         Initialize WLED controller
-        
+
         Args:
             host: WLED device URL
             timeout: Request timeout in seconds
@@ -292,43 +294,153 @@ class WLEDController:
         self.timeout = timeout
         self.current_state = RobotState.IDLE
         self.last_preset = None
-        self._brightness = 26  # 10% brightness (26/255)
+        self._brightness = 13  # 5% brightness (13/255) - dimmer than cat's eyes
         self._is_on = False
-        
+
         # Brightness levels
-        self.NORMAL_BRIGHTNESS = 26    # 10% for normal operation
-        self.ALERT_BRIGHTNESS = 255    # 100% for attention-getting effects
-        self.HEADLIGHT_BRIGHTNESS = 128  # 50% for headlights mode
-        
+        self.NORMAL_BRIGHTNESS = 13    # 5% for normal operation - dimmer than cat's eyes
+        self.ALERT_BRIGHTNESS = 200    # 78% for attention-getting effects (reduced from 100%)
+        self.HEADLIGHT_BRIGHTNESS = 100  # 39% for headlights mode (reduced from 50%)
+
         # Headlights state
         self.headlights_active = False
+
+        # Rate limiting configuration
+        self.rate_limit_enabled = True
+        self.min_request_interval = 0.1  # Minimum 100ms between requests
+        self.max_queue_size = 10  # Maximum pending requests
+        self.last_request_time = 0
+        self.request_queue = deque(maxlen=self.max_queue_size)
+        self.queue_lock = Lock()
+        self.processing_thread = None
+        self.processing_active = False
+        self.last_state_cache = None  # Cache last successful state
+        self.cache_timeout = 0.5  # Cache valid for 500ms
+        self.last_cache_time = 0
+
+        # Start the request processing thread
+        self._start_processing_thread()
         
-    def _send_request(self, endpoint: str, data: Optional[Dict] = None, method: str = "POST") -> Optional[Dict]:
-        """
-        Send request to WLED API
-        
-        Args:
-            endpoint: API endpoint
-            data: JSON data to send
-            method: HTTP method
-            
-        Returns:
-            Response JSON or None if failed
-        """
+    def _start_processing_thread(self):
+        """Start the background thread for processing queued requests"""
+        if not self.processing_thread or not self.processing_thread.is_alive():
+            self.processing_active = True
+            self.processing_thread = Thread(target=self._process_queue, daemon=True)
+            self.processing_thread.start()
+            logger.info("Started WLED request processing thread")
+
+    def _stop_processing_thread(self):
+        """Stop the background processing thread"""
+        self.processing_active = False
+        if self.processing_thread:
+            self.processing_thread.join(timeout=2.0)
+            logger.info("Stopped WLED request processing thread")
+
+    def _process_queue(self):
+        """Background thread that processes queued requests with rate limiting"""
+        while self.processing_active:
+            try:
+                with self.queue_lock:
+                    if not self.request_queue:
+                        time.sleep(0.05)  # Sleep briefly if queue is empty
+                        continue
+
+                    # Check rate limit
+                    current_time = time.time()
+                    time_since_last = current_time - self.last_request_time
+                    if time_since_last < self.min_request_interval:
+                        time.sleep(self.min_request_interval - time_since_last)
+                        continue
+
+                    # Get next request
+                    request_data = self.request_queue.popleft()
+
+                # Process the request
+                endpoint = request_data['endpoint']
+                data = request_data.get('data')
+                method = request_data.get('method', 'POST')
+
+                result = self._send_request_internal(endpoint, data, method)
+
+                # Update cache if successful
+                if result and endpoint == "/json/state":
+                    self.last_state_cache = data
+                    self.last_cache_time = time.time()
+
+                self.last_request_time = time.time()
+
+            except Exception as e:
+                logger.error(f"Error processing WLED request queue: {e}")
+                time.sleep(0.1)
+
+    def _send_request_internal(self, endpoint: str, data: Optional[Dict] = None, method: str = "POST") -> Optional[Dict]:
+        """Internal method to actually send the request (not rate limited)"""
         url = f"{self.host}{endpoint}"
-        
+
         try:
             if method == "POST":
                 response = requests.post(url, json=data, timeout=self.timeout)
             else:
                 response = requests.get(url, timeout=self.timeout)
-                
+
             response.raise_for_status()
             return response.json()
-            
+
         except requests.RequestException as e:
             logger.error(f"WLED request failed: {e}")
             return None
+
+    def _send_request(self, endpoint: str, data: Optional[Dict] = None, method: str = "POST") -> Optional[Dict]:
+        """
+        Send request to WLED API with rate limiting
+
+        Args:
+            endpoint: API endpoint
+            data: JSON data to send
+            method: HTTP method
+
+        Returns:
+            Response JSON or None if failed
+        """
+        if not self.rate_limit_enabled:
+            # Bypass rate limiting if disabled
+            return self._send_request_internal(endpoint, data, method)
+
+        # For GET requests, check cache first
+        if method == "GET" and endpoint == "/json/state":
+            current_time = time.time()
+            if (self.last_state_cache and
+                current_time - self.last_cache_time < self.cache_timeout):
+                logger.debug("Returning cached state")
+                return self.last_state_cache
+
+        # Queue the request
+        with self.queue_lock:
+            # If queue is full, drop oldest request
+            if len(self.request_queue) >= self.max_queue_size:
+                dropped = self.request_queue.popleft()
+                logger.warning(f"Dropped WLED request due to queue overflow: {dropped}")
+
+            # Add to queue
+            request_data = {
+                'endpoint': endpoint,
+                'data': data,
+                'method': method,
+                'timestamp': time.time()
+            }
+            self.request_queue.append(request_data)
+            logger.debug(f"Queued WLED request: {endpoint} (queue size: {len(self.request_queue)})")
+
+        # For state updates, return success immediately (fire and forget)
+        if endpoint == "/json/state":
+            return {'success': True}
+
+        # For GET requests, wait briefly for result
+        if method == "GET":
+            time.sleep(0.2)  # Wait briefly for processing
+            return self.last_state_cache
+
+        return {'success': True}
     
     def get_info(self) -> Optional[Dict]:
         """Get WLED device information"""
@@ -612,6 +724,39 @@ class WLEDController:
     def is_headlights_active(self) -> bool:
         """Check if headlights mode is active"""
         return self.headlights_active
+
+    def set_rate_limit(self, enabled: bool = True, min_interval: float = 0.1):
+        """Configure rate limiting
+
+        Args:
+            enabled: Enable/disable rate limiting
+            min_interval: Minimum seconds between requests
+        """
+        self.rate_limit_enabled = enabled
+        self.min_request_interval = max(0.05, min_interval)  # Minimum 50ms
+        logger.info(f"Rate limiting {'enabled' if enabled else 'disabled'} "
+                   f"(min interval: {self.min_request_interval}s)")
+
+    def get_queue_status(self) -> Dict:
+        """Get current queue status for monitoring"""
+        with self.queue_lock:
+            return {
+                'queue_size': len(self.request_queue),
+                'max_queue_size': self.max_queue_size,
+                'rate_limit_enabled': self.rate_limit_enabled,
+                'min_interval': self.min_request_interval,
+                'processing_active': self.processing_active
+            }
+
+    def clear_queue(self):
+        """Clear all pending requests"""
+        with self.queue_lock:
+            self.request_queue.clear()
+            logger.info("Cleared WLED request queue")
+
+    def __del__(self):
+        """Cleanup on deletion"""
+        self._stop_processing_thread()
 
 
 # Global instance

@@ -1,12 +1,27 @@
 /* App-specific styles - inherits from index.css */
 
-/* Main Layout */
+/* Main Layout - #root now fills viewport for background effects */
 #root {
+  /* Background effects need full viewport */
+  width: 100vw;
+  min-height: 100vh;
+  margin: 0;
+  padding: 0;
+}
+
+/* Content container with original constraints */
+.app-container {
   max-width: var(--container-width);
   margin: 0 auto;
   padding: var(--container-padding);
   text-align: center;
+  position: relative;
+  z-index: 10;
+  min-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
 }
+
 
 .card {
   padding: var(--space-lg);
@@ -181,6 +196,9 @@ audio {
   margin-top: 0;
   margin-bottom: var(--space-md);
   color: var(--primary-color);
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
 }
 
 .visual-description p {
@@ -194,6 +212,28 @@ audio {
   background: var(--primary-color);
   border: none;
   border-radius: var(--border-radius-sm);
+}
+
+.refresh-button {
+  background: transparent;
+  border: 2px solid var(--primary-color);
+  color: var(--primary-color);
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--border-radius-sm);
+  cursor: pointer;
+  font-size: var(--text-base);
+  transition: all 0.2s ease;
+  margin-left: auto;
+}
+
+.refresh-button:hover {
+  background: var(--primary-color);
+  color: var(--bg-primary);
+  transform: rotate(90deg);
+}
+
+.refresh-button:active {
+  transform: rotate(180deg);
 }
 
 /* System Vitals */
@@ -326,4 +366,98 @@ audio {
     grid-template-columns: 1fr;
     gap: var(--space-sm);
   }
+}
+
+/* Volume Control Styles */
+.volume-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex: 1;
+}
+
+.volume-slider {
+  flex: 1;
+  height: 6px;
+  background: var(--bg-tertiary);
+  border-radius: 3px;
+  outline: none;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+  cursor: pointer;
+}
+
+.volume-slider:hover {
+  opacity: 1;
+}
+
+.volume-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  background: var(--primary);
+  border-radius: 50%;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.volume-slider::-webkit-slider-thumb:hover {
+  background: var(--primary-hover);
+  transform: scale(1.1);
+}
+
+.volume-slider::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  background: var(--primary);
+  border-radius: 50%;
+  cursor: pointer;
+  border: none;
+  transition: all 0.2s;
+}
+
+.volume-slider::-moz-range-thumb:hover {
+  background: var(--primary-hover);
+  transform: scale(1.1);
+}
+
+.volume-slider:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.volume-value {
+  min-width: 60px;
+  text-align: right;
+  font-weight: bold;
+  color: var(--text-primary);
+}
+
+.mute-button {
+  padding: var(--space-sm) var(--space-md);
+  border: none;
+  border-radius: var(--border-radius);
+  font-weight: bold;
+  cursor: pointer;
+  transition: all 0.2s;
+  width: 100%;
+}
+
+.mute-button.unmuted {
+  background: var(--success);
+  color: white;
+}
+
+.mute-button.muted {
+  background: var(--error);
+  color: white;
+}
+
+.mute-button:hover {
+  opacity: 0.8;
+  transform: scale(1.02);
+}
+
+.mute-button:active {
+  transform: scale(0.98);
 }

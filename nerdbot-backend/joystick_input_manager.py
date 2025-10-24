@@ -41,11 +41,21 @@ class JoystickInputManager:
         self.last_input_time = defaultdict(float)
         self.input_threshold = 0.01  # 10ms between identical inputs
         
+        # Combined control state - tracks current input from all surfaces
+        self.control_state = {
+            'forward_back': 0.0,    # -1.0 to 1.0 (negative = backward, positive = forward)
+            'left_right': 0.0,      # -1.0 to 1.0 (negative = left strafe, positive = right strafe)  
+            'rotation': 0.0         # -1.0 to 1.0 (negative = rotate left, positive = rotate right)
+        }
+        
         # Button debouncing - prevent rapid button presses
         self.button_last_press = defaultdict(float)
         self.button_debounce_time = 0.5  # 500ms debounce for most buttons
         self.meme_button_debounce_time = 1.0  # 1 second debounce for meme sound button
         self.laser_headlight_debounce_time = 0.5  # 500ms debounce for laser/headlight buttons
+        
+        # Motor state tracking to prevent repeated stop commands
+        self.motors_active = False
         
     def find_controller(self) -> bool:
         """Find and initialize the first available joystick"""
@@ -98,6 +108,44 @@ class JoystickInputManager:
             return False
         self.last_input_time[input_key] = current_time
         return True
+    
+    def _apply_combined_control(self):
+        """Apply the current combined control state to motors using mecanum wheel math"""
+        forward_back = self.control_state['forward_back']
+        left_right = self.control_state['left_right'] 
+        rotation = self.control_state['rotation']
+        
+        # If all inputs are within deadzone, stop the motors (but only once)
+        if abs(forward_back) < self.analog_deadzone and abs(left_right) < self.analog_deadzone and abs(rotation) < self.trigger_deadzone:
+            if self.motors_active:  # Only send stop command if motors were previously active
+                self._notify_motor_subscribers('stop')
+                self.motors_active = False
+            return
+            
+        # Use mecanum wheel mathematics to combine all motion vectors
+        # Each wheel gets a combination of forward/back, strafe, and rotation
+        # This allows for complex movements like forward+strafe+rotation simultaneously
+        
+        # Calculate individual wheel speeds based on mecanum geometry
+        # Front-left wheel: forward + strafe + rotation
+        # Front-right wheel: forward - strafe - rotation  
+        # Rear-left wheel: forward - strafe + rotation
+        # Rear-right wheel: forward + strafe - rotation
+        
+        # Since our motor control functions are discrete, we'll determine
+        # the dominant motion and apply it, but with combined intensity
+        combined_intensity = min(1.0, abs(forward_back) + abs(left_right) + abs(rotation))
+        
+        # Create a combined motion vector and determine the best motor action
+        if abs(forward_back) > self.analog_deadzone or abs(left_right) > self.analog_deadzone or abs(rotation) > self.trigger_deadzone:
+            # Mark motors as active when sending commands
+            self.motors_active = True
+            # Use the new combined motor control
+            self._notify_motor_subscribers('combined', 
+                                         forward_back=forward_back,
+                                         left_right=left_right, 
+                                         rotation=rotation,
+                                         intensity=combined_intensity)
     
     def _toggle_headlights(self):
         """Toggle headlights functionality via HTTP API for state synchronization"""
@@ -175,6 +223,46 @@ class JoystickInputManager:
         threading.Thread(target=make_request, daemon=True).start()
         self.logger.info("Random meme sound request sent (non-blocking)")
     
+    def _play_welcome_message(self):
+        """Play welcome message via TTS API (non-blocking)"""
+        def make_request():
+            try:
+                import requests
+                # Use the Flask server's TTS API with the welcome message
+                response = requests.post('http://localhost:5000/api/tts/welcome', timeout=2.0)
+                if response.status_code == 200:
+                    data = response.json()
+                    self.logger.info(f"Welcome message started: {data.get('message', 'Success')}")
+                else:
+                    self.logger.error(f"Welcome message API request failed: {response.status_code}")
+            except Exception as e:
+                self.logger.error(f"Failed to play welcome message via API: {e}")
+        
+        # Run HTTP request in separate thread to avoid blocking button detection
+        import threading
+        threading.Thread(target=make_request, daemon=True).start()
+        self.logger.info("Welcome message request sent (non-blocking)")
+    
+    def _cycle_mode(self):
+        """Cycle through robot modes via HTTP API (non-blocking)"""
+        def make_request():
+            try:
+                import requests
+                # Use the Flask server's mode cycling API with short timeout
+                response = requests.post('http://localhost:5000/api/mode/cycle', timeout=2.0)
+                if response.status_code == 200:
+                    data = response.json()
+                    self.logger.info(f"Mode cycled successfully: {data.get('message', 'Success')}")
+                else:
+                    self.logger.error(f"Mode cycle API request failed: {response.status_code}")
+            except Exception as e:
+                self.logger.error(f"Failed to cycle mode via API: {e}")
+        
+        # Run HTTP request in separate thread to avoid blocking button detection
+        import threading
+        threading.Thread(target=make_request, daemon=True).start()
+        self.logger.info("Mode cycle request sent (non-blocking)")
+    
     def _handle_dpad_input(self, dpad_x: float, dpad_y: float):
         """Handle D-pad input for movement controls"""
         # Note: D-pad is currently disabled in original code due to Steam Controller mapping issues
@@ -206,51 +294,39 @@ class JoystickInputManager:
                 self._notify_servo_subscribers('tilt', direction='down')
 
     def _handle_left_touchpad(self, pad_x: float, pad_y: float):
-        """Handle left touchpad for robot movement (WASD-style)"""
+        """Handle left touchpad for robot movement (WASD-style) - updates control state"""
         # Apply deadzone
         if abs(pad_x) < self.analog_deadzone:
             pad_x = 0
         if abs(pad_y) < self.analog_deadzone:
             pad_y = 0
             
-        # Forward/backward movement
-        if pad_y < -self.analog_deadzone:  # Forward (up on touchpad)
-            if self._should_process_input('move_forward'):
-                self._notify_motor_subscribers('move', direction='forward', speed=abs(pad_y))
-        elif pad_y > self.analog_deadzone:  # Backward (down on touchpad)
-            if self._should_process_input('move_backward'):
-                self._notify_motor_subscribers('move', direction='backward', speed=pad_y)
-                
-        # Left/right strafing
-        if pad_x < -self.analog_deadzone:  # Strafe left
-            if self._should_process_input('strafe_left'):
-                self._notify_motor_subscribers('strafe', direction='left', speed=abs(pad_x))
-        elif pad_x > self.analog_deadzone:  # Strafe right
-            if self._should_process_input('strafe_right'):
-                self._notify_motor_subscribers('strafe', direction='right', speed=pad_x)
+        # Update control state instead of sending direct motor commands
+        # Y-axis: forward/backward movement (inverted: negative pad_y = forward)
+        self.control_state['forward_back'] = -pad_y  # Invert Y axis
+        
+        # X-axis: left/right strafing (negative pad_x = strafe left)
+        self.control_state['left_right'] = pad_x
+        
+        # Apply the combined control
+        if self._should_process_input('left_touchpad'):
+            self._apply_combined_control()
 
     def _handle_right_touchpad(self, pad_x: float, pad_y: float):
-        """Handle right circular touchpad for rotation with distance-based speed"""
-        # Calculate distance from center (0,0) to touch point
-        import math
-        distance = math.sqrt(pad_x * pad_x + pad_y * pad_y)
+        """Handle right circular touchpad for rotation - updates control state"""
+        # Apply deadzone to individual axes
+        if abs(pad_x) < self.analog_deadzone:
+            pad_x = 0
+        if abs(pad_y) < self.analog_deadzone:
+            pad_y = 0
         
-        # Only process if outside deadzone
-        if distance > self.analog_deadzone:
-            # Calculate angle to determine rotation direction
-            angle = math.atan2(pad_y, pad_x)
-            
-            # Normalize distance to 0-1 range for speed control
-            speed = min(distance, 1.0)
-            
-            # Determine rotation direction based on touch position
-            # Left side of touchpad = rotate left, right side = rotate right
-            if pad_x < -self.analog_deadzone:  # Left side
-                if self._should_process_input('touchpad_rotate_left'):
-                    self._notify_motor_subscribers('rotate', direction='left', intensity=speed)
-            elif pad_x > self.analog_deadzone:  # Right side
-                if self._should_process_input('touchpad_rotate_right'):
-                    self._notify_motor_subscribers('rotate', direction='right', intensity=speed)
+        # Update rotation state based on X position (left/right)
+        # Negative pad_x = rotate left, positive pad_x = rotate right
+        self.control_state['rotation'] = pad_x
+        
+        # Apply the combined control
+        if self._should_process_input('right_touchpad'):
+            self._apply_combined_control()
     
     def _handle_button_input(self, button_id: int, pressed: bool):
         """Handle button press events with debouncing"""
@@ -274,23 +350,25 @@ class JoystickInputManager:
         self.logger.info(f"Button pressed: ID {button_id}")
             
         # Steam Controller specific button mappings
-        if button_id == 0:  # A button - center pan only (don't interrupt tilt tracking)
+        if button_id == 2:  # A button - center pan/tilt
             self._notify_servo_subscribers('pan_center')
         elif button_id == 1:  # Button ID 1 - reserved for future use
             pass
-        elif button_id == 2:  # X button - reserved for future use
-            pass
+        elif button_id == 4:  # X button - cycle modes
+            self._cycle_mode()
         elif button_id == 3:  # B button - emergency stop motors
             self._notify_motor_subscribers('stop')
         elif button_id == 5:  # Y button - play random meme sound
             self._play_random_meme_sound()
         elif button_id == 6:  # Back/Menu button (left of Steam button) - reserved for future use
             pass
+        elif button_id == 7:  # Right shoulder button - play welcome message
+            self._play_welcome_message()
         elif button_id == 10:  # Button left of Menu button - toggle headlights
             self._toggle_headlights()
         elif button_id == 11:  # Button ID 11 - toggle laser
             self._toggle_laser()
-        # Additional buttons could be mapped here (4=LB, 5=RB, 7=Start, etc.)
+        # Additional buttons could be mapped here (4=LB, 5=RB, etc.)
     
     def _handle_trigger_input(self, left_trigger: float, right_trigger: float):
         """Handle trigger input for rotation"""
@@ -363,7 +441,17 @@ class JoystickInputManager:
         """Main input processing loop - runs in separate thread"""
         self.logger.info("Joystick input manager thread started")
         
+        # Add startup delay to prevent initial input processing
+        self.logger.info("Waiting 2 seconds before processing joystick input to prevent startup interference...")
+        time.sleep(2.0)
+        
         try:
+            # Clear any initial button/axis states to prevent phantom inputs
+            if self.joystick:
+                pygame.event.pump()
+                self._update_button_states()
+                self.logger.info("Initial joystick states cleared, starting input processing")
+            
             while self.running:
                 self._process_input()
                 time.sleep(0.01)  # 100Hz update rate for responsiveness

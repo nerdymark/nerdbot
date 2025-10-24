@@ -75,6 +75,95 @@ body {
   font-size: var(--text-base);
 }
 
+/* Synthwave Grid Background */
+#root {
+  position: relative;
+  min-height: 100vh;
+  height: 100vh;
+  overflow-x: hidden;
+  background: linear-gradient(180deg, #0d001a 0%, #1a0033 30%, #330066 100%);
+}
+
+/* Grid floor with perspective */
+#root::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-image: 
+    linear-gradient(rgba(0, 255, 255, 0.8) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 255, 255, 0.8) 1px, transparent 1px);
+  background-size: 60px 60px;
+  background-position: 0 0;
+  animation: grid-move 20s linear infinite;
+  transform: perspective(600px) rotateX(75deg) translateZ(0);
+  transform-origin: center 80%;
+  pointer-events: none;
+  z-index: 1;
+  mask-image: linear-gradient(to bottom, 
+    transparent 0%, 
+    rgba(0,0,0,0.3) 20%, 
+    rgba(0,0,0,0.8) 50%, 
+    black 80%);
+}
+
+/* Neon glow overlay */
+#root::after {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: 
+    radial-gradient(ellipse at center 70%, 
+      rgba(255, 0, 255, 0.2) 0%, 
+      transparent 70%),
+    radial-gradient(ellipse at 30% 100%, 
+      rgba(0, 255, 255, 0.3) 0%, 
+      transparent 60%),
+    radial-gradient(ellipse at 70% 100%, 
+      rgba(255, 0, 128, 0.2) 0%, 
+      transparent 60%);
+  pointer-events: none;
+  z-index: 2;
+  animation: pulse-glow 6s ease-in-out infinite;
+}
+
+
+@keyframes grid-move {
+  0% {
+    transform: perspective(600px) rotateX(75deg) translateZ(0) translateY(0);
+    background-position: 0 0;
+  }
+  100% {
+    transform: perspective(600px) rotateX(75deg) translateZ(0) translateY(0);
+    background-position: 0 60px;
+  }
+}
+
+@keyframes pulse-glow {
+  0%, 100% {
+    opacity: 0.8;
+  }
+  33% {
+    opacity: 1;
+  }
+  66% {
+    opacity: 0.9;
+  }
+}
+
+
+
+/* Ensure content appears above background */
+#root > .app-container {
+  position: relative;
+  z-index: 10;
+}
+
 /* Typography */
 h1 {
   font-size: var(--text-3xl);

@@ -1,13 +1,12 @@
-# pylint: disable=no-member
+#!/usr/bin/env python3
 """
-Activate / Deactivate a laser connected to a relay module
-Relay module is connected to the Raspberry Pi GPIO pins
+Laser control using lgpio directly for Raspberry Pi 5
+This version directly controls GPIO 21 without gpiozero abstraction
 """
 import logging
 import os
-import time
 
-# Check if we're on a Raspberry Pi 5 (uses lgpio)
+# Check if we're on a Raspberry Pi 5
 IS_PI5 = os.path.exists('/dev/gpiochip0') and os.path.exists('/proc/device-tree/model')
 if IS_PI5:
     try:
@@ -23,12 +22,11 @@ except ImportError:
     LGPIO_AVAILABLE = False
     logging.warning("lgpio not available - laser control will use simulation mode")
 
-
 LASER_PIN = 21
 
 class LaserControl:
     """
-    Class to control the laser using lgpio directly for Pi 5
+    Direct laser control using lgpio for Raspberry Pi 5
     """
     def __init__(self):
         self.is_active = False
@@ -37,45 +35,32 @@ class LaserControl:
         self.pin_claimed = False
         
         if self.gpio_available:
-            max_attempts = 3
-            for attempt in range(max_attempts):
+            try:
+                # Open GPIO chip
+                self.chip = lgpio.gpiochip_open(0)
+                
+                # Try to free the pin first if it's already in use
                 try:
-                    # Open GPIO chip
-                    self.chip = lgpio.gpiochip_open(0)
-                    
-                    # Force free the GPIO pin if it's already in use
-                    # This is more aggressive - we try multiple methods
+                    lgpio.gpio_free(self.chip, LASER_PIN)
+                    logging.info(f"Freed existing claim on GPIO {LASER_PIN}")
+                except:
+                    pass  # Pin wasn't claimed, that's fine
+                
+                # Claim the pin as output (start with LOW/OFF)
+                lgpio.gpio_claim_output(self.chip, LASER_PIN, 0)
+                self.pin_claimed = True
+                logging.info(f"Laser control initialized with lgpio on GPIO pin {LASER_PIN}")
+                
+            except Exception as e:
+                logging.error(f"Failed to initialize lgpio for laser control: {e}")
+                self.gpio_available = False
+                self.pin_claimed = False
+                if self.chip is not None:
                     try:
-                        # First try normal free
-                        lgpio.gpio_free(self.chip, LASER_PIN)
-                        logging.info(f"Freed existing claim on GPIO {LASER_PIN}")
+                        lgpio.gpiochip_close(self.chip)
                     except:
-                        # If that fails, try to claim it anyway (this sometimes works)
                         pass
-                    
-                    # Try to claim the pin as output (start with LOW/OFF)
-                    lgpio.gpio_claim_output(self.chip, LASER_PIN, 0)
-                    self.pin_claimed = True
-                    logging.info(f"Laser control initialized with lgpio on GPIO pin {LASER_PIN} (attempt {attempt + 1})")
-                    break  # Success, exit the retry loop
-                    
-                except Exception as e:
-                    logging.warning(f"Attempt {attempt + 1} failed to initialize lgpio: {e}")
-                    if self.chip is not None:
-                        try:
-                            lgpio.gpiochip_close(self.chip)
-                        except:
-                            pass
-                        self.chip = None
-                    
-                    if attempt < max_attempts - 1:
-                        # Wait a bit before retrying
-                        time.sleep(0.5)
-                    else:
-                        # Final attempt failed
-                        logging.error(f"Failed to initialize lgpio for laser control after {max_attempts} attempts: {e}")
-                        self.gpio_available = False
-                        self.pin_claimed = False
+                    self.chip = None
         else:
             logging.info("Laser control initialized in simulation mode (not Pi5 or lgpio unavailable)")
 
@@ -152,9 +137,24 @@ class LaserControl:
         self.is_active = False
 
 if __name__ == "__main__":
+    # Test the laser control
+    logging.basicConfig(level=logging.INFO)
+    
+    print("Testing laser control with lgpio...")
     laser = LaserControl()
+    
+    if laser.gpio_available:
+        print("GPIO available, testing real hardware control")
+    else:
+        print("GPIO not available, running in simulation mode")
+    
+    print("\nActivating laser...")
     laser.activate_laser()
     input("Press Enter to deactivate the laser")
+    
+    print("Deactivating laser...")
     laser.deactivate_laser()
+    
+    print("Cleaning up...")
     laser.cleanup()
-    print("Laser deactivated")
+    print("Test complete!")

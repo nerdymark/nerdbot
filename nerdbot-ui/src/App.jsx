@@ -8,6 +8,7 @@ function App() {
   const [isVideoFeedActive, setIsVideoFeedActive] = useState(false);
   const [currentMode, setCurrentMode] = useState(null);
   const [headlightsOn, setHeadlightsOn] = useState(false);
+  const [laserOn, setLaserOn] = useState(false);
   const frontCamera = 'http://10.0.1.204:5000/cam0'
   const rearCamera = 'http://10.0.1.204:5000/cam1'
   const visualDescriptionEndpoint = 'http://10.0.1.204:5000/api/visual_awareness'
@@ -17,6 +18,8 @@ function App() {
   const [visualDescription, setVisualDescription] = useState(null);
   const [botVitals, setBotVitals] = useState(null);
   const [vitalsError, setVitalsError] = useState(null);
+  const [volume, setVolume] = useState(75);
+  const [isMuted, setIsMuted] = useState(false);
 
   // const cameras = [
   //   {
@@ -47,6 +50,45 @@ function App() {
     }
 
   }
+
+  // Volume control functions
+  const volumeEndpoint = 'http://10.0.1.204:5000/api/volume'
+  const handleVolumeChange = async (newVolume) => {
+    try {
+      const response = await fetch(volumeEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ volume: newVolume }),
+      });
+      if (response.ok) {
+        setVolume(newVolume);
+        console.log(`Volume set to ${newVolume}%`);
+      }
+    } catch (error) {
+      console.error('Error setting volume:', error);
+    }
+  };
+
+  const handleMuteToggle = async () => {
+    try {
+      const response = await fetch(`${volumeEndpoint}/mute`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setIsMuted(data.muted);
+        setVolume(data.volume);
+        console.log(`Audio ${data.muted ? 'muted' : 'unmuted'}`);
+      }
+    } catch (error) {
+      console.error('Error toggling mute:', error);
+    }
+  };
 
   const motorEndpoint = 'http://10.0.1.204:5000/api/motor/'
   const handleMotorControl = (direction) => {
@@ -129,6 +171,27 @@ function App() {
       console.error('Error toggling headlights:', error);
     }
   }
+
+  const handleLaserToggle = async () => {
+    try {
+      const response = await fetch('http://10.0.1.204:5000/api/laser/toggle', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        setLaserOn(data.laser_on);
+        console.log('Laser toggled:', data.laser_on);
+      } else {
+        console.error('Failed to toggle laser');
+      }
+    } catch (error) {
+      console.error('Error toggling laser:', error);
+    }
+  }
   
   const handleModeChange = async (mode) => {
     console.log('handleModeChange called with mode:', mode);
@@ -155,7 +218,7 @@ function App() {
   
   const handleKeyPress = (e) => {
     if (e.key === 'Enter') {
-      handleSendMessage();
+      handleSendMessage({ type: "tts", content: message });
     }
   }
 
@@ -169,13 +232,13 @@ function App() {
     }
   
     try {
-      console.log('Sending POST request to http://10.0.1.204:5000/api/tts/' + encodeURIComponent(messageObj.content));
-      const response = await fetch('http://10.0.1.204:5000/api/tts/' + encodeURIComponent(messageObj.content), {
+      console.log('Sending POST request to http://10.0.1.204:5000/api/tts');
+      const response = await fetch('http://10.0.1.204:5000/api/tts', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ message: messageObj.content }),
+        body: JSON.stringify({ text: messageObj.content }),
       });
   
       console.log('Response status:', response.status);
@@ -274,43 +337,64 @@ function App() {
       }
     };
 
-    fetchHeadlightStatus();
-  }, []);
-
-  useEffect(() => {
-    const fetchVisualDescription = async () => {
+    const fetchLaserStatus = async () => {
       try {
-        const response = await axios.get(visualDescriptionEndpoint);
-        setVisualDescription(response.data[0]);
+        const response = await fetch('http://10.0.1.204:5000/api/laser/status');
+        if (response.ok) {
+          const data = await response.json();
+          setLaserOn(data.laser_on);
+        }
       } catch (error) {
-        console.error('Error fetching visual description:', error);
+        console.error('Error fetching laser status:', error);
       }
     };
 
+    // Fetch initial status
+    fetchHeadlightStatus();
+    fetchLaserStatus();
+
+    // Poll for status updates every 1 second to sync with joystick changes
+    const intervalId = setInterval(() => {
+      fetchHeadlightStatus();
+      fetchLaserStatus();
+    }, 1000);
+
+    // Cleanup interval on unmount
+    return () => clearInterval(intervalId);
+  }, []);
+
+  const fetchVisualDescription = async () => {
+    try {
+      const response = await axios.get(visualDescriptionEndpoint);
+      setVisualDescription(response.data[0]);
+    } catch (error) {
+      console.error('Error fetching visual description:', error);
+    }
+  };
+
+  useEffect(() => {
     fetchVisualDescription();
   }, []);
 
+  // Fetch initial volume
   useEffect(() => {
-    const ws = new WebSocket('ws://your-backend-url/vitals');
-    
-    ws.onmessage = (event) => {
+    const fetchVolume = async () => {
       try {
-        const data = JSON.parse(event.data);
-        console.log('Received vitals:', data);
-        setBotVitals(data);
-      } catch (err) {
-        console.error('Error parsing vitals:', err);
-        setVitalsError(err.message);
+        const response = await fetch(volumeEndpoint);
+        if (response.ok) {
+          const data = await response.json();
+          setVolume(data.volume);
+          setIsMuted(data.muted);
+        }
+      } catch (error) {
+        console.error('Error fetching volume:', error);
       }
     };
-  
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      setVitalsError('Failed to connect to robot');
-    };
-  
-    return () => ws.close();
+    fetchVolume();
   }, []);
+
+  // WebSocket for vitals is not implemented on backend yet
+  // Using HTTP polling instead
 
   useEffect(() => {
     const fetchVitals = async () => {
@@ -339,9 +423,9 @@ function App() {
 
   return (
     <>
-      <h1>nerdbot</h1>
-      <Soundboard />
-      <div className="card">
+      <div className="app-container">
+        <h1>nerdbot</h1>
+        <div className="card">
         <div className="cameras">
           <div
             className="video-container"
@@ -443,6 +527,21 @@ function App() {
           >
             💡 Headlights {headlightsOn ? 'ON' : 'OFF'}
           </button>
+          <button 
+            onClick={handleLaserToggle}
+            className={`laser-button ${laserOn ? 'active' : ''}`}
+            style={{
+              backgroundColor: laserOn ? '#ff0000' : '#333',
+              color: laserOn ? '#fff' : '#fff',
+              border: '2px solid #ff0000',
+              padding: '10px 20px',
+              borderRadius: '5px',
+              cursor: 'pointer',
+              fontWeight: 'bold'
+            }}
+          >
+            🔴 Laser {laserOn ? 'ON' : 'OFF'}
+          </button>
         </div>
 
         {/* System Vitals Card */}
@@ -499,12 +598,49 @@ function App() {
           </div>
         )}
 
+        {/* Volume Control Widget */}
+        <div className="vitals-card">
+          <h3>🔊 Speaker Volume</h3>
+          <div className="vital-row">
+            <span>🔈 Volume</span>
+            <div className="volume-controls">
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={volume}
+                onChange={(e) => handleVolumeChange(parseInt(e.target.value))}
+                className="volume-slider"
+                disabled={isMuted}
+              />
+              <span className="volume-value">{isMuted ? 'MUTED' : `${volume}%`}</span>
+            </div>
+          </div>
+          <div className="vital-row">
+            <button
+              onClick={handleMuteToggle}
+              className={`mute-button ${isMuted ? 'muted' : 'unmuted'}`}
+            >
+              {isMuted ? '🔇 Unmute' : '🔊 Mute'}
+            </button>
+          </div>
+        </div>
+
         {visualDescription ? (
             <div className="visual-description">
                 <div>
-                <h3>What&apos;s in front of me?</h3>
+                <h3>
+                  What&apos;s in front of me?
+                  <button
+                    className="refresh-button"
+                    onClick={fetchVisualDescription}
+                    title="Refresh visual awareness"
+                  >
+                    🔄
+                  </button>
+                </h3>
                 <p>{visualDescription.front}</p>
-                <button 
+                <button
                     className="tts-button"
                     onClick={() => handleSendMessage({
                         type: "tts",
@@ -515,12 +651,21 @@ function App() {
                 </button>
                 </div>
                 <div>
-                <h3>What&apos;s behind me?</h3>
+                <h3>
+                  What&apos;s behind me?
+                  <button
+                    className="refresh-button"
+                    onClick={fetchVisualDescription}
+                    title="Refresh visual awareness"
+                  >
+                    🔄
+                  </button>
+                </h3>
                 <p>{visualDescription.rear}</p>
-                <button 
+                <button
                     className="tts-button"
                     onClick={() => handleSendMessage({
-                        type: "tts", 
+                        type: "tts",
                         content: visualDescription.rear
                     })}
                 >
@@ -534,6 +679,8 @@ function App() {
             </div>
             )}
       </div>
+      </div>
+      <Soundboard />
     </>
   )
 }

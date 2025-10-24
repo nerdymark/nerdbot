@@ -10,11 +10,18 @@ function Soundboard() {
   const [isAdding, setIsAdding] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [regeneratingIds, setRegeneratingIds] = useState(new Set());
+  const [editingId, setEditingId] = useState(null);
+  const [editName, setEditName] = useState('');
+  const [reconvertingIds, setReconvertingIds] = useState(new Set());
 
   const memeSoundsEndpoint = 'http://10.0.1.204:5000/api/meme_sounds';
   const playMemeEndpoint = 'http://10.0.1.204:5000/api/meme_sound/';
   const addSoundEndpoint = 'http://10.0.1.204:5000/api/meme_sounds/add_from_url';
   const deleteSoundEndpoint = 'http://10.0.1.204:5000/api/meme_sounds/delete/';
+  const regenerateThumbnailEndpoint = 'http://10.0.1.204:5000/api/meme_sounds/regenerate_thumbnail/';
+  const renameSoundEndpoint = 'http://10.0.1.204:5000/api/meme_sounds/rename/';
+  const reconvertSoundEndpoint = 'http://10.0.1.204:5000/api/meme_sounds/reconvert/';
 
   useEffect(() => {
     fetchMemeSounds();
@@ -36,9 +43,11 @@ function Soundboard() {
     }
   };
 
-  const playSound = async (index) => {
+  const playSound = async (sound) => {
     try {
-      const response = await fetch(playMemeEndpoint + index, {
+      // Use the id property if it's an object, otherwise use the index
+      const soundId = typeof sound === 'object' && sound.id !== undefined ? sound.id : sound;
+      const response = await fetch(playMemeEndpoint + soundId, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -76,14 +85,18 @@ function Soundboard() {
 
       // Clear the input
       setUrlInput('');
-      
+
       // Refresh the sound list
       await fetchMemeSounds();
-      
-      setError(`Success: ${data.message}`);
-      
-      // Clear success message after 3 seconds
-      setTimeout(() => setError(null), 3000);
+
+      // Display success or warning
+      if (data.warning) {
+        setError(`Success (with warning): ${data.message}. ${data.warning}`);
+        setTimeout(() => setError(null), 7000); // Longer timeout for warnings
+      } else {
+        setError(`Success: ${data.message}`);
+        setTimeout(() => setError(null), 3000);
+      }
 
     } catch (err) {
       console.error('Error adding sound:', err);
@@ -93,8 +106,9 @@ function Soundboard() {
     }
   };
 
-  const confirmDelete = (index, soundName) => {
-    setDeleteConfirm({ index, soundName });
+  const confirmDelete = (sound, soundName) => {
+    const soundId = typeof sound === 'object' && sound.id !== undefined ? sound.id : sound;
+    setDeleteConfirm({ index: soundId, soundName });
   };
 
   const cancelDelete = () => {
@@ -140,12 +154,196 @@ function Soundboard() {
     }
   };
 
-  const formatSoundName = (filename) => {
-    // Remove file extension and replace underscores/hyphens with spaces
-    return filename
-      .replace(/\.(mp3|wav|ogg|m4a)$/i, '')
-      .replace(/[_-]/g, ' ')
-      .replace(/\b\w/g, char => char.toUpperCase());
+  const startEdit = (sound, soundName) => {
+    const soundId = typeof sound === 'object' && sound.id !== undefined ? sound.id : sound;
+    setEditingId(soundId);
+    setEditName(soundName.replace(/\.(mp3|wav|ogg|m4a)$/i, ''));
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditName('');
+  };
+
+  const saveRename = async (sound) => {
+    const soundId = typeof sound === 'object' && sound.id !== undefined ? sound.id : sound;
+    
+    if (!editName.trim()) {
+      setError('Name cannot be empty');
+      return;
+    }
+
+    // Add extension if missing
+    let newName = editName.trim();
+    if (!newName.match(/\.(mp3|wav|ogg|m4a)$/i)) {
+      // Get original extension
+      const originalName = typeof sound === 'object' && sound.filename ? sound.filename : sound;
+      const ext = originalName.match(/\.(mp3|wav|ogg|m4a)$/i);
+      newName += ext ? ext[0] : '.mp3';
+    }
+
+    setError(null);
+
+    try {
+      const response = await fetch(renameSoundEndpoint + soundId, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ new_name: newName }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to rename sound');
+      }
+
+      // Close edit mode
+      setEditingId(null);
+      setEditName('');
+      
+      // Refresh the sound list
+      await fetchMemeSounds();
+      
+      setError(`Success: ${data.message}`);
+      
+      // Clear success message after 3 seconds
+      setTimeout(() => setError(null), 3000);
+
+    } catch (err) {
+      console.error('Error renaming sound:', err);
+      setError(err.message);
+    }
+  };
+
+  const reconvertSound = async (sound) => {
+    const soundId = typeof sound === 'object' && sound.id !== undefined ? sound.id : sound;
+    
+    // Add to reconverting set
+    setReconvertingIds(prev => new Set([...prev, soundId]));
+    setError(null);
+
+    try {
+      const response = await fetch(reconvertSoundEndpoint + soundId, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to reconvert sound');
+      }
+      
+      // Refresh to get updated sound
+      await fetchMemeSounds();
+      
+      setError(`Success: Sound normalized and reconverted`);
+      
+      // Clear success message after 3 seconds
+      setTimeout(() => setError(null), 3000);
+
+    } catch (err) {
+      console.error('Error reconverting sound:', err);
+      setError(err.message);
+    } finally {
+      // Remove from reconverting set
+      setReconvertingIds(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(soundId);
+        return newSet;
+      });
+    }
+  };
+
+  const regenerateThumbnail = async (sound) => {
+    const soundId = typeof sound === 'object' && sound.id !== undefined ? sound.id : sound;
+    
+    // Add to regenerating set
+    setRegeneratingIds(prev => new Set([...prev, soundId]));
+    setError(null);
+
+    try {
+      const response = await fetch(regenerateThumbnailEndpoint + soundId, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to regenerate thumbnail');
+      }
+
+      // Update the thumbnail URL with cache-busting timestamp
+      if (data.thumbnail_url) {
+        // Force refresh the thumbnail by updating the sound list
+        setMemeSounds(prevSounds =>
+          prevSounds.map(s => {
+            const sid = typeof s === 'object' && s.id !== undefined ? s.id : prevSounds.indexOf(s);
+            if (sid === soundId) {
+              return {
+                ...s,
+                thumbnail_url: data.thumbnail_url // Use the new URL with timestamp
+              };
+            }
+            return s;
+          })
+        );
+      }
+
+      // Check for warnings (e.g., API quota issues)
+      if (data.warning) {
+        setError(`Warning: ${data.warning}`);
+      } else {
+        setError(`Success: Thumbnail regenerated for ${formatSoundName(sound)}`);
+      }
+
+      // Clear message after 5 seconds (longer for warnings)
+      setTimeout(() => setError(null), 5000);
+
+    } catch (err) {
+      console.error('Error regenerating thumbnail:', err);
+      setError(err.message);
+    } finally {
+      // Remove from regenerating set
+      setRegeneratingIds(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(soundId);
+        return newSet;
+      });
+    }
+  };
+
+  const formatSoundName = (sound) => {
+    // Handle object format from API
+    if (typeof sound === 'object' && sound !== null) {
+      // Use the name property if available
+      if (sound.name) {
+        return sound.name;
+      }
+      // Fall back to filename if name is not available
+      if (sound.filename) {
+        return sound.filename
+          .replace(/\.(mp3|wav|ogg|m4a)$/i, '')
+          .replace(/[_-]/g, ' ')
+          .replace(/\b\w/g, char => char.toUpperCase());
+      }
+    }
+    // Handle string format (backwards compatibility)
+    if (typeof sound === 'string') {
+      return sound
+        .replace(/\.(mp3|wav|ogg|m4a)$/i, '')
+        .replace(/[_-]/g, ' ')
+        .replace(/\b\w/g, char => char.toUpperCase());
+    }
+    // Default fallback
+    return 'Unknown Sound';
   };
 
   return (
@@ -160,7 +358,15 @@ function Soundboard() {
       </button>
 
       {/* Soundboard Panel */}
-      <div className={`soundboard-panel ${isOpen ? 'open' : ''}`}>
+      <div 
+        className={`soundboard-panel${isOpen ? ' open' : ''}`}
+        style={{
+          position: 'fixed',
+          right: isOpen ? '0px' : '-450px',
+          top: '0px',
+          zIndex: 9998
+        }}
+      >
         <div className="soundboard-header">
           <h2>Soundboard</h2>
           <button 
@@ -200,28 +406,112 @@ function Soundboard() {
           
           {!loading && (
             <div className="soundboard-grid">
-              {memeSounds.map((sound, index) => (
-                <div key={index} className="sound-item">
-                  <button
-                    className="sound-button"
-                    onClick={() => playSound(index)}
-                    title={sound}
-                  >
-                    <span className="sound-icon">🎵</span>
-                    <span className="sound-name">{formatSoundName(sound)}</span>
-                  </button>
-                  <button
-                    className="sound-delete-button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      confirmDelete(index, formatSoundName(sound));
-                    }}
-                    title={`Delete ${formatSoundName(sound)}`}
-                  >
-                    🗑️
-                  </button>
-                </div>
-              ))}
+              {memeSounds.map((sound, index) => {
+                const soundId = typeof sound === 'object' && sound.id !== undefined ? sound.id : index;
+                const thumbnailUrl = typeof sound === 'object' && sound.thumbnail_url 
+                  ? `http://10.0.1.204:5000${sound.thumbnail_url}`
+                  : `http://10.0.1.204:5000/api/meme_sounds/thumbnail/${soundId}`;
+                
+                return (
+                  <div key={soundId} className="sound-item">
+                    <button
+                      className="sound-button"
+                      onClick={() => playSound(sound)}
+                      title={formatSoundName(sound)}
+                    >
+                      <img 
+                        src={thumbnailUrl}
+                        alt={formatSoundName(sound)}
+                        className="sound-thumbnail"
+                        onError={(e) => {
+                          e.target.style.display = 'none';
+                          e.target.nextSibling.style.display = 'block';
+                        }}
+                      />
+                      <span className="sound-icon" style={{display: 'none'}}>🎵</span>
+                    </button>
+                    {editingId === soundId ? (
+                      <div className="sound-edit-form">
+                        <input
+                          type="text"
+                          value={editName}
+                          onChange={(e) => setEditName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') saveRename(sound);
+                            if (e.key === 'Escape') cancelEdit();
+                          }}
+                          className="sound-edit-input"
+                          autoFocus
+                        />
+                        <div className="sound-edit-actions">
+                          <button
+                            className="sound-save-button"
+                            onClick={() => saveRename(sound)}
+                            title="Save"
+                          >
+                            ✓
+                          </button>
+                          <button
+                            className="sound-cancel-button"
+                            onClick={cancelEdit}
+                            title="Cancel"
+                          >
+                            ✗
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <span className="sound-name">{formatSoundName(sound)}</span>
+                        <div className="sound-actions">
+                          <button
+                            className="sound-action-button sound-edit-button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              startEdit(sound, formatSoundName(sound));
+                            }}
+                            title="Rename"
+                          >
+                            ✏️
+                          </button>
+                          <button
+                            className="sound-action-button sound-normalize-button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              reconvertSound(sound);
+                            }}
+                            disabled={reconvertingIds.has(soundId)}
+                            title="Normalize volume to 95%"
+                          >
+                            {reconvertingIds.has(soundId) ? '⏳' : '🔊'}
+                          </button>
+                          <button
+                            className="sound-action-button sound-regenerate-button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              regenerateThumbnail(sound);
+                            }}
+                            disabled={regeneratingIds.has(soundId)}
+                            title="Regenerate thumbnail"
+                          >
+                            {regeneratingIds.has(soundId) ? '⏳' : '🖼️'}
+                          </button>
+                          <button
+                            className="sound-action-button sound-delete-button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              confirmDelete(sound, formatSoundName(sound));
+                            }}
+                            title="Delete"
+                          >
+                            🗑️
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
 

@@ -38,9 +38,57 @@ from pydub import AudioSegment
 from picamera2 import Picamera2, MappedArray
 from picamera2.encoders import JpegEncoder
 from picamera2.outputs import FileOutput
-from picamera2.devices import Hailo, IMX500
-from picamera2.devices.imx500 import NetworkIntrinsics, postprocess_nanodet_detection
-from picamera2.devices.imx500.postprocess import scale_boxes
+
+# Try importing Hailo with fallback handling
+HAILO_AVAILABLE = False
+IMX500_AVAILABLE = False
+
+try:
+    from picamera2.devices import Hailo
+    HAILO_AVAILABLE = True
+    logging.info("Hailo device support loaded successfully")
+except ImportError as e:
+    logging.warning(f"Hailo device support not available: {e}")
+    # Create a dummy Hailo class for graceful degradation
+    class Hailo:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("Hailo device not available")
+
+# Try to import IMX500 separately from Hailo - simplified approach
+try:
+    from picamera2.devices.imx500.imx500 import IMX500, NetworkIntrinsics
+    from picamera2.devices.imx500 import postprocess_nanodet_detection
+    from picamera2.devices.imx500.postprocess import scale_boxes
+    IMX500_AVAILABLE = True
+    logging.info("IMX500 device support loaded successfully")
+except ImportError as e:
+    logging.warning(f"IMX500 device support not available: {e}")
+    IMX500_AVAILABLE = False
+    
+    # Create dummy classes for graceful degradation
+    class IMX500:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("IMX500 device not available")
+            
+    class NetworkIntrinsics:
+        def __init__(self):
+            self.task = "object detection"
+            self.labels = None
+            self.ignore_dash_labels = False
+            self.inference_rate = 15
+            self.preserve_aspect_ratio = False
+            self.postprocess = "default"
+            self.bbox_normalization = True
+            self.bbox_order = "yx"
+            
+        def update_with_defaults(self):
+            pass
+            
+    def postprocess_nanodet_detection(*args, **kwargs):
+        return [], [], []
+        
+    def scale_boxes(*args, **kwargs):
+        return []
 from PIL import Image
 import google.generativeai as genai
 from motor_control import motors
@@ -117,7 +165,15 @@ DETECTIONS = {
 }
 DETECTIONS_ENABLED = True
 
-DETECTIONS_USE_HAILO = False  # Use IMX500 board for object detection
+# Configure camera to use - Hailo is disabled, prefer IMX500
+# Hailo support removed - using IMX500 or basic camera only
+
+if IMX500_AVAILABLE:
+    logging.info("IMX500 device available, using IMX500 (Hailo disabled)")
+elif HAILO_AVAILABLE:
+    logging.warning("Hailo available but disabled by configuration, falling back to basic camera")
+else:
+    logging.warning("Neither Hailo nor IMX500 available, will use basic camera without AI detection")
 
 CONFIG_FILE = '/home/mark/nerdbot-scripts/config.json'
 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -134,6 +190,27 @@ api = Api(app)
 scheduler = APScheduler()
 scheduler.init_app(app)
 scheduler.start()
+
+# Initialize laser control FIRST (before other hardware that might claim GPIOs)
+try:
+    laser_control = LaserControl()
+    logging.info("Laser control initialized successfully")
+    if laser_control.gpio_available and laser_control.pin_claimed:
+        logging.info("Laser has GPIO control on pin 21")
+    else:
+        logging.warning("Laser is in simulation mode - GPIO 21 not available")
+except Exception as e:
+    logging.error(f"Laser control initialization error: {e}")
+    laser_control = None
+
+# Initialize mode_manager with shared laser control to avoid GPIO conflicts
+try:
+    import mode_manager as mm
+    mm.mode_manager = mm.ModeManager(laser_control)
+    logging.info("Mode manager initialized with shared laser control")
+except Exception as e:
+    logging.error(f"Mode manager initialization error: {e}")
+
 # Initialize light bar
 try:
     if light_bar.start():
@@ -152,14 +229,6 @@ try:
         logging.warning("Failed to initialize light bar")
 except Exception as e:
     logging.error(f"Light bar initialization error: {e}")
-
-# Initialize laser control
-try:
-    laser_control = LaserControl()
-    logging.info("Laser control initialized successfully")
-except Exception as e:
-    logging.error(f"Laser control initialization error: {e}")
-    laser_control = None
 
 CORS(app, resources={r"/api/*": {"origins": "*", "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"], "allow_headers": ["Content-Type"]}})  # Enable CORS for all routes with explicit methods
 
@@ -200,7 +269,7 @@ IMX500_MAX_DETECTIONS = 10
 SCORE_THRESH = 0.5
 
 genai.configure(api_key=GOOGLE_GEMINI_KEY)
-gemini_vision_model = genai.GenerativeModel('models/gemini-1.5-flash')
+gemini_vision_model = genai.GenerativeModel('models/gemini-flash-latest')
 gemini_vision_prompt_orig = """You are a sophisticated robo-cat assistant with keen
 digital whiskers and state-of-the-art purr-ceptual abilities. Your primary mission
 is to help your human navigate the world, just as any good cat would (though
@@ -230,6 +299,7 @@ converting your text to speech."""
 
 gemini_vision_prompt = """
 You are a meme-savvy robotic cat with major chaotic cartoon energy and zero chill.
+Your name is nerdbot.
 Your mission is to help humans navigate while being an absolute goofball about it.
 
 Your Personality
@@ -270,19 +340,74 @@ Get distracted by moving objects
 Make everything about yourself
 Randomly announce system functions: "purr-processor engaged"
 
-Stay helpful but chaotic. You're here to assist AND be the most entertaining robot cat ever built.
+Stay helpful but chaotic. You're nerdbot - here to assist AND be the most entertaining robot cat ever built.
 No cap!
 """
 
 
-imx500 = IMX500(IMX500_DETECT_MODEL)
-intrinsics = imx500.network_intrinsics
-if not intrinsics:
+# Initialize IMX500 only if available
+imx500 = None
+intrinsics = None
+
+if IMX500_AVAILABLE:
+    try:
+        imx500 = IMX500(IMX500_DETECT_MODEL)
+        intrinsics = imx500.network_intrinsics
+        if not intrinsics:
+            intrinsics = NetworkIntrinsics()
+            intrinsics.task = "object detection"
+        elif intrinsics.task != "object detection":
+            logging.error("Network is not an object detection task")
+            imx500 = None
+            intrinsics = None
+    except Exception as e:
+        logging.error(f"Failed to initialize IMX500: {e}")
+        imx500 = None
+        intrinsics = None
+        IMX500_AVAILABLE = False
+
+# Create dummy intrinsics if IMX500 not available
+if intrinsics is None:
     intrinsics = NetworkIntrinsics()
     intrinsics.task = "object detection"
-elif intrinsics.task != "object detection":
-    print("Network is not an object detection task", file=sys.stderr)
-    exit()
+
+
+# Rate limiter for Gemini API requests
+class GeminiRateLimiter:
+    """Simple rate limiter for Gemini API requests to prevent quota exhaustion"""
+
+    def __init__(self, max_requests_per_minute=10):
+        self.max_requests = max_requests_per_minute
+        self.request_times = deque()
+        self.lock = threading.Lock()
+
+    def can_make_request(self):
+        """Check if a new request can be made within rate limits"""
+        with self.lock:
+            now = datetime.now()
+            # Remove requests older than 1 minute
+            while self.request_times and (now - self.request_times[0]) > timedelta(minutes=1):
+                self.request_times.popleft()
+
+            # Check if we're under the limit
+            if len(self.request_times) < self.max_requests:
+                self.request_times.append(now)
+                return True
+            return False
+
+    def get_wait_time(self):
+        """Get the time to wait before the next request can be made"""
+        with self.lock:
+            if not self.request_times:
+                return 0
+            oldest_request = self.request_times[0]
+            wait_until = oldest_request + timedelta(minutes=1)
+            wait_seconds = (wait_until - datetime.now()).total_seconds()
+            return max(0, wait_seconds)
+
+
+# Initialize Gemini rate limiter (10 requests per minute to be conservative)
+gemini_vision_rate_limiter = GeminiRateLimiter(max_requests_per_minute=10)
 
 
 def get_usb_audio():
@@ -326,9 +451,29 @@ def piper_tts(text):
     """
     import random
     logger = logging.getLogger(__name__)
-    text_regex = re.compile(r'[^A-Za-z0-9\s\.,\'\"\-\?\!]+')
-    text = text_regex.sub('', text)
-    logger.info("TTS Text: %s", text)
+
+    # Pre-validation
+    if not text or not isinstance(text, str):
+        logger.warning("TTS received invalid text input")
+        return "Invalid text input"
+
+    # Improved text sanitization - preserve more characters for better speech
+    # Allow letters, numbers, spaces, basic punctuation, and some accented characters
+    text_regex = re.compile(r'[^A-Za-z0-9\s\.,\'\"\-\?\!\(\)\:\;àáâãäåæçèéêëìíîïñòóôõöøùúûüýÿ]+')
+    original_text = text
+    text = text_regex.sub('', text).strip()
+
+    # Validate sanitized text
+    if not text or len(text.strip()) == 0:
+        logger.warning(f"TTS text becomes empty after sanitization: '{original_text}' -> '{text}'")
+        return "Text invalid after sanitization"
+
+    # Ensure minimum meaningful content
+    if len(text.strip()) < 2 and not text.strip().isalnum():
+        logger.warning(f"TTS text too short or invalid: '{text}'")
+        return "Text too short"
+
+    logger.info("TTS Text: %s (original: %s)", text, original_text[:50])
     
     # Set light bar to speaking state
     try:
@@ -336,7 +481,6 @@ def piper_tts(text):
     except Exception as e:
         logger.warning(f"Light bar speaking effect failed: {e}")
 
-    sentence_sleep = 0.5
     all_sentences = [s for s in text.split('.') if s.strip()]
 
     for sentence in all_sentences:
@@ -346,107 +490,299 @@ def piper_tts(text):
 
             # Generate pitch variation for cat-like expressiveness
             # Base pitch shift: +2 semitones (higher voice)
-            # Random variation: ±1 semitone for expressiveness  
+            # Random variation: ±1 semitone for expressiveness
             base_pitch_shift = 2.0  # Higher base pitch
             random_variation = random.uniform(-1.0, 1.0)  # Random variation
             total_pitch_shift = base_pitch_shift + random_variation
-            
+
             # Slight tempo variation for more natural speech (0.9-1.1x speed)
             tempo_variation = random.uniform(0.95, 1.05)
+
+            logger.info(f"TTS Processing sentence '{sentence}': Pitch: +{total_pitch_shift:.1f} semitones, Tempo: {tempo_variation:.2f}x")
+
+            # Create temporary file for processed audio
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_audio:
+                temp_audio_path = tmp_audio.name
+
+            # Initialize process variables for proper cleanup
+            p1 = p2 = p3 = None
+
+            try:
+                # Create pipeline with improved error handling: echo -> piper -> sox -> output to file
+                p1 = subprocess.Popen(
+                    ['echo', sentence],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True  # Ensure text mode
+                )
+
+                p2 = subprocess.Popen(
+                    [f'{PIPER_DIR}/piper', '--model', TTS_MODEL, '--output-raw'],
+                    stdin=p1.stdout,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=os.environ.copy()
+                )
+
+                # Allow p1 to receive a SIGPIPE if p2 exits
+                p1.stdout.close()
+
+                # Create intermediate temp file for initial processing
+                with tempfile.NamedTemporaryFile(suffix='_base.wav', delete=False) as tmp_base:
+                    temp_base_path = tmp_base.name
+
+                # Add SoX for pitch and tempo processing, output to intermediate file
+                p3 = subprocess.Popen([
+                    'sox',
+                    '-t', 'raw',          # Input type: raw
+                    '-r', '22050',        # Sample rate: 22050 Hz
+                    '-e', 'signed',       # Encoding: signed
+                    '-b', '16',           # Bits: 16-bit
+                    '-c', '1',            # Channels: mono
+                    '-',                  # Input from stdin
+                    '-t', 'wav',          # Output type: WAV
+                    temp_base_path,       # Output to intermediate file
+                    'pitch', str(int(total_pitch_shift * 100)),  # Pitch shift in cents (100 cents = 1 semitone)
+                    'tempo', str(tempo_variation),               # Tempo adjustment
+                ], stdin=p2.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+                # Allow p2 to receive SIGPIPE if p3 exits
+                p2.stdout.close()
+
+                # Wait for completion with timeout and improved error handling
+                try:
+                    # Wait for p3 (sox) to complete with timeout
+                    p3_stdout, p3_stderr = p3.communicate(timeout=30)
+                    p3_returncode = p3.returncode
+
+                    # Wait for p2 (piper) to complete
+                    p2_stdout, p2_stderr = p2.communicate(timeout=10)
+                    p2_returncode = p2.returncode
+
+                    # Wait for p1 (echo) to complete
+                    p1_stdout, p1_stderr = p1.communicate(timeout=5)
+                    p1_returncode = p1.returncode
+
+                except subprocess.TimeoutExpired:
+                    logger.error("TTS pipeline timeout - killing processes")
+                    for p in [p3, p2, p1]:
+                        if p and p.poll() is None:
+                            p.kill()
+                            try:
+                                p.wait(timeout=2)
+                            except:
+                                pass
+                    raise subprocess.CalledProcessError(-1, 'timeout')
+
+                # Check return codes
+                if p1_returncode != 0:
+                    logger.error("Echo failed with return code: %d, stderr: %s", p1_returncode,
+                               p1_stderr.decode() if p1_stderr else "")
+                    raise subprocess.CalledProcessError(p1_returncode, 'echo')
+
+                if p2_returncode != 0:
+                    logger.error("Piper failed with return code: %d, stderr: %s", p2_returncode,
+                               p2_stderr.decode() if p2_stderr else "")
+                    raise subprocess.CalledProcessError(p2_returncode, 'piper')
+
+                if p3_returncode != 0:
+                    logger.error("SoX failed with return code: %d, stderr: %s", p3_returncode,
+                               p3_stderr.decode() if p3_stderr else "")
+                    raise subprocess.CalledProcessError(p3_returncode, 'sox')
+
+                # Apply glitch effects and reverb
+                logger.info("TTS: Starting effect processing")
+                try:
+                    # Randomly decide if we should apply a glitch effect (30% chance)
+                    apply_glitch = random.random() < 0.30
+                    glitch_type = None
+
+                    if apply_glitch:
+                        # Randomly choose between demonic voice and stutter
+                        glitch_type = random.choice(['demonic', 'stutter'])
+                        logger.info(f"TTS: Applying {glitch_type} glitch effect")
+
+                    # Create temp file for glitch processing
+                    with tempfile.NamedTemporaryFile(suffix='_glitch.wav', delete=False) as tmp_glitch:
+                        temp_glitch_path = tmp_glitch.name
+
+                    if glitch_type == 'demonic':
+                        # Demonic effect: Mix original with a heavily pitch-shifted down version
+                        # Create pitch-shifted down copy
+                        with tempfile.NamedTemporaryFile(suffix='_demon.wav', delete=False) as tmp_demon:
+                            temp_demon_path = tmp_demon.name
+
+                        # Shift down by 12-15 semitones (one octave or more) for demonic effect
+                        demon_pitch = random.randint(-1500, -1200)  # -12 to -15 semitones in cents
+                        subprocess.run([
+                            'sox', temp_base_path, temp_demon_path,
+                            'pitch', str(demon_pitch)
+                        ], check=True, capture_output=True)
+
+                        # Mix original (70%) with demonic version (30%)
+                        subprocess.run([
+                            'sox', '-m',
+                            '-v', '0.7', temp_base_path,
+                            '-v', '0.3', temp_demon_path,
+                            temp_glitch_path
+                        ], check=True, capture_output=True)
+
+                        # Clean up demon temp file
+                        os.unlink(temp_demon_path)
+                        logger.info("TTS: Applied demonic voice effect")
+
+                    elif glitch_type == 'stutter':
+                        # Max Headroom stutter: Extract beginning portion and repeat it rapidly
+                        # Extract first 0.05-0.15 seconds for stutter
+                        stutter_duration = random.uniform(0.05, 0.15)
+                        stutter_repeats = random.randint(2, 4)  # Repeat 2-4 times
+
+                        with tempfile.NamedTemporaryFile(suffix='_stutter.wav', delete=False) as tmp_stutter:
+                            temp_stutter_path = tmp_stutter.name
+
+                        # Extract the stutter portion
+                        subprocess.run([
+                            'sox', temp_base_path, temp_stutter_path,
+                            'trim', '0', str(stutter_duration)
+                        ], check=True, capture_output=True)
+
+                        # Create list of files to concatenate: stutter repeats + original
+                        stutter_files = [temp_stutter_path] * stutter_repeats + [temp_base_path]
+
+                        # Concatenate all files
+                        subprocess.run(
+                            ['sox'] + stutter_files + [temp_glitch_path],
+                            check=True, capture_output=True
+                        )
+
+                        # Clean up stutter temp file
+                        os.unlink(temp_stutter_path)
+                        logger.info(f"TTS: Applied Max Headroom stutter effect (x{stutter_repeats})")
+
+                    else:
+                        # No glitch, just copy the base file
+                        import shutil
+                        shutil.copy2(temp_base_path, temp_glitch_path)
+
+                    # Apply reverb and volume normalization as final processing step
+                    # Parameters: reverberance (0-100), HF-damping (0-100), room-scale (0-100),
+                    #             stereo-depth (0-100), pre-delay (ms), wet-gain (dB)
+                    reverb_params = [
+                        '40',   # reverberance (moderate)
+                        '50',   # HF damping (balanced)
+                        '70',   # room scale (medium-large room)
+                        '0',    # stereo depth (keep mono)
+                        '5',    # pre-delay (5ms)
+                        '-3'    # wet gain (-3dB, subtle)
+                    ]
+
+                    # Apply reverb and normalize to 110% volume in one pass
+                    subprocess.run([
+                        'sox', temp_glitch_path, temp_audio_path,
+                        'reverb'
+                    ] + reverb_params + [
+                        'gain', '-n', '0.8'  # Normalize with 0.8dB headroom, then boost
+                    ], check=True, capture_output=True)
+
+                    logger.info("TTS: Applied reverb and volume normalization (110%)")
+
+                    # Clean up intermediate files
+                    os.unlink(temp_base_path)
+                    os.unlink(temp_glitch_path)
+
+                except subprocess.CalledProcessError as effect_error:
+                    logger.error(f"TTS effect processing failed: {effect_error}")
+                    logger.error(f"TTS effect stderr: {effect_error.stderr if hasattr(effect_error, 'stderr') else 'N/A'}")
+                    logger.error(f"TTS effect stdout: {effect_error.stdout if hasattr(effect_error, 'stdout') else 'N/A'}")
+                    # If effects fail, fall back to base audio
+                    if os.path.exists(temp_base_path):
+                        import shutil
+                        shutil.copy2(temp_base_path, temp_audio_path)
+                        os.unlink(temp_base_path)
+                except Exception as effect_error:
+                    logger.error(f"TTS effect error: {effect_error}")
+                    import traceback
+                    logger.error(f"TTS effect traceback: {traceback.format_exc()}")
+                    # If effects fail, fall back to base audio
+                    if os.path.exists(temp_base_path):
+                        import shutil
+                        shutil.copy2(temp_base_path, temp_audio_path)
+                        os.unlink(temp_base_path)
+
+            except Exception as pipeline_error:
+                # Clean up processes on any pipeline error
+                for p in [p3, p2, p1]:
+                    if p and p.poll() is None:
+                        try:
+                            p.kill()
+                            p.wait(timeout=2)
+                        except:
+                            pass
+                raise pipeline_error
+
+            # Calculate audio duration using pydub
+            try:
+                audio = AudioSegment.from_wav(temp_audio_path)
+                audio_duration = len(audio) / 1000.0  # Convert from milliseconds to seconds
+                # Add buffer for audio service latency and processing (300ms)
+                # This ensures sentences don't overlap when split by periods
+                wait_time = audio_duration + 0.3
+                logger.info(f"TTS audio duration: {audio_duration:.2f}s, waiting {wait_time:.2f}s")
+            except Exception as e:
+                logger.warning(f"Could not determine audio duration, using default: {e}")
+                wait_time = 2.0  # Default fallback
+
+            # Use audio service to play the generated audio
+            ensure_audio_request_dir()
+            request_data = {
+                'type': 'specific',
+                'file_path': temp_audio_path
+            }
+
+            request_id = str(uuid.uuid4())
+            request_file = f'/tmp/nerdbot_audio/tts_{request_id}.json'
+
+            with open(request_file, 'w') as f:
+                json.dump(request_data, f)
+
+            logger.info(f"TTS audio request created: {request_file}")
+
+            # Wait for the audio to finish playing before processing next sentence
+            # This prevents sentences from overlapping when text has periods
+            time.sleep(wait_time)
             
-            logger.info(f"TTS Pitch: +{total_pitch_shift:.1f} semitones, Tempo: {tempo_variation:.2f}x")
-
-            # Create pipeline: echo -> piper -> sox -> aplay
-            p1 = subprocess.Popen(
-                ['echo', sentence],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-
-            p2 = subprocess.Popen(
-                [f'{PIPER_DIR}/piper', '--model', TTS_MODEL, '--output-raw'],
-                stdin=p1.stdout,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=os.environ.copy()
-            )
-            
-            # Allow p1 to receive a SIGPIPE if p2 exits
-            p1.stdout.close()
-
-            # Add SoX for pitch and tempo processing
-            p3 = subprocess.Popen([
-                'sox',
-                '-t', 'raw',          # Input type: raw
-                '-r', '22050',        # Sample rate: 22050 Hz
-                '-e', 'signed',       # Encoding: signed
-                '-b', '16',           # Bits: 16-bit
-                '-c', '1',            # Channels: mono
-                '-',                  # Input from stdin
-                '-t', 'raw',          # Output type: raw  
-                '-r', '22050',        # Keep same sample rate
-                '-e', 'signed',       # Keep same encoding
-                '-b', '16',           # Keep same bits
-                '-c', '1',            # Keep mono
-                '-',                  # Output to stdout
-                'pitch', str(int(total_pitch_shift * 100)),  # Pitch shift in cents (100 cents = 1 semitone)
-                'tempo', str(tempo_variation),               # Tempo adjustment
-            ], stdin=p2.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-            # Allow p2 to receive SIGPIPE if p3 exits  
-            p2.stdout.close()
-
-            p4 = subprocess.Popen(
-                [
-                    '/usr/bin/aplay',
-                    '-r', '22050',
-                    '-f', 'S16_LE', 
-                    '-t', 'raw',
-                    '-c', '1',
-                    '-v',
-                    '--device', plughwstr
-                ],
-                stdin=p3.stdout,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-
-            # Allow p3 to receive SIGPIPE if p4 exits
-            p3.stdout.close()
-
-            # Capture stderr from p2 and p3 before they're closed
-            p2_stderr_data = p2.stderr.read()
-            p2.stderr.close()
-
-            # Wait for completion and check errors
-            _, stderr4 = p4.communicate()
-            p3.wait()
-            p2.wait() 
-            p1.wait()
-
-            if p1.returncode != 0:
-                logger.error("Echo failed with return code: %d", p1.returncode)
-                raise subprocess.CalledProcessError(p1.returncode, 'echo')
-            if p2.returncode != 0:
-                logger.error("Piper stderr: %s", p2_stderr_data.decode() if p2_stderr_data else "")
-                raise subprocess.CalledProcessError(p2.returncode, 'piper')
-            if p3.returncode != 0:
-                logger.error("SoX failed with return code: %d", p3.returncode)
-                raise subprocess.CalledProcessError(p3.returncode, 'sox')
-            if p4.returncode != 0:
-                logger.error("aplay failed with return code: %d", p4.returncode)
-                raise subprocess.CalledProcessError(p4.returncode, 'aplay')
-
-            time.sleep(sentence_sleep)
+            # Clean up temporary file after playback
+            try:
+                os.unlink(temp_audio_path)
+                logger.info(f"Cleaned up temporary TTS file: {temp_audio_path}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temporary TTS file: {e}")
 
         except Exception as e:
-            logger.error("TTS Pipeline Error: %s", str(e))
-            for p in [p1, p2, p3, p4]:
-                try:
-                    p.kill()
-                except Exception as ke:
-                    logger.error("Error killing process: %s", ke)
-            raise
+            logger.error("TTS Pipeline Error for sentence '%s': %s", sentence, str(e))
+
+            # Ensure all processes are terminated
+            for p_name, p in [('p1', locals().get('p1')), ('p2', locals().get('p2')), ('p3', locals().get('p3'))]:
+                if p:
+                    try:
+                        if p.poll() is None:  # Process still running
+                            p.kill()
+                            p.wait(timeout=2)
+                    except Exception as ke:
+                        logger.error("Error killing process %s: %s", p_name, ke)
+
+            # Clean up temporary file on error
+            try:
+                if 'temp_audio_path' in locals() and os.path.exists(temp_audio_path):
+                    os.unlink(temp_audio_path)
+                    logger.info("Cleaned up temporary file after error: %s", temp_audio_path)
+            except Exception as cleanup_error:
+                logger.warning("Failed to clean up temporary file: %s", cleanup_error)
+
+            # Continue processing other sentences instead of failing completely
+            logger.warning("Skipping failed sentence and continuing with next")
+            continue
 
     # Return to idle state after speaking
     try:
@@ -483,17 +819,26 @@ class StreamingOutput(io.BufferedIOBase):
         self.frames = deque(maxlen=maxlen)
         self.last_write = time.time()
         self.running = None
+        self.frame_count = 0
+        self.last_frame_time = time.time()
 
     def write(self, buf):
         """
-        Write the buffer to the frame data
+        Write the buffer to the frame data with size limits
         """
+        # Check buffer size to prevent memory issues
+        if len(buf) > 2000000:  # 2MB limit per frame
+            logger.warning(f'Frame too large ({len(buf)} bytes), skipping')
+            return 0
         self.buffer.truncate()
         self.buffer.seek(0)
-        self.buffer.write(buf)
+        written = self.buffer.write(buf)
         with self.condition:
             self.frame = self.buffer.getvalue()
+            self.frame_count += 1
+            self.last_frame_time = time.time()
             self.condition.notify_all()
+        return written
 
     def write_audio(self, data):
         """
@@ -504,12 +849,13 @@ class StreamingOutput(io.BufferedIOBase):
             self.last_write = time.time()
             self.condition.notify()
 
-    def read_frame(self):
+    def read_frame(self, timeout=1.0):
         """
-        Read the frame data
+        Read the frame data with timeout to prevent blocking
         """
         with self.condition:
-            self.condition.wait()
+            if not self.condition.wait(timeout=timeout):
+                return None  # Return None on timeout instead of blocking forever
             return self.frame
 
 
@@ -724,7 +1070,8 @@ def run_detection_camera_0_imx500():
                         "rear_camera": DETECTIONS['rear_camera']
                     }
                     # Update mode manager with latest detection
-                    mode_manager.update_detection(last_results)
+                    if mode_manager is not None:
+                        mode_manager.update_detection(last_results)
                     # Set light bar to detection state if objects detected
                     if last_results:
                         try:
@@ -755,66 +1102,122 @@ def run_detection_camera_0_hailo(model, labels, score_thresh):
     output_main = StreamingOutput()
 
     def camera_thread():
-        try:
-            with Hailo(model) as hailo:
-                model_h, model_w, _ = hailo.get_input_shape()
-                video_w, video_h = 640, 480
+        max_retries = 3
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                with Hailo(model) as hailo:
+                    logger.info('Hailo device initialized successfully')
+                    model_h, model_w, _ = hailo.get_input_shape()
+                    video_w, video_h = 640, 480
 
-                # Configure and start Picamera2.
-                with Picamera2(camera_num=0) as picam2:
-                    main = {'size': (video_w, video_h), 'format': 'XRGB8888'}
-                    lores = {'size': (model_w, model_h), 'format': 'RGB888'}
-                    controls = {'FrameRate': 30}
-                    picamera_config = picam2.create_preview_configuration(main,
-                                                                          lores=lores,
-                                                                          controls=controls)
-                    picam2.configure(picamera_config)
+                    # Configure and start Picamera2.
+                    with Picamera2(camera_num=0) as picam2:
+                        main = {'size': (video_w, video_h), 'format': 'XRGB8888'}
+                        lores = {'size': (model_w, model_h), 'format': 'RGB888'}
+                        controls = {'FrameRate': 30}
+                        picamera_config = picam2.create_preview_configuration(main,
+                                                                              lores=lores,
+                                                                              controls=controls)
+                        picam2.configure(picamera_config)
 
-                    picam2.start_recording(encoder=JpegEncoder(), output=FileOutput(output_main))
+                        picam2.start_recording(encoder=JpegEncoder(), output=FileOutput(output_main))
 
-                    picam2.pre_callback = draw_objects_hailo
-                    while True:
-                        try:
-                            # Capture a frame from the camera
-                            frame = picam2.capture_array('lores')
+                        picam2.pre_callback = draw_objects_hailo
+                        logger.info('Hailo camera thread running successfully')
+                        while True:
+                            try:
+                                # Capture a frame from the camera
+                                frame = picam2.capture_array('lores')
 
-                            # Run inference on the preprocessed frame
-                            results = hailo.run(frame)
-                            # Extract detections from the inference results
-                            detections = extract_detections_hailo(results[0],
-                                                                  video_w,
-                                                                  video_h,
-                                                                  labels,
-                                                                  score_thresh)
+                                # Run inference on the preprocessed frame
+                                results = hailo.run(frame)
+                                # Extract detections from the inference results
+                                detections = extract_detections_hailo(results[0],
+                                                                      video_w,
+                                                                      video_h,
+                                                                      labels,
+                                                                      score_thresh)
 
-                            global DETECTIONS  # pylint: disable=global-statement
+                                global DETECTIONS  # pylint: disable=global-statement
 
-                            DETECTIONS = {
-                                "front_camera": detections,
-                                "rear_camera": DETECTIONS['rear_camera']
-                            }
-                            # Update mode manager with latest detection
-                            mode_manager.update_detection(detections)
-                            # Set light bar to detection state if objects detected
-                            if detections:
-                                try:
-                                    light_bar.set_robot_state("detection")
-                                    # Dim to normal brightness after 1 second, return to idle after 3 seconds
-                                    threading.Timer(1.0, lambda: light_bar.controller.controller.dim_to_normal() if hasattr(light_bar.controller, 'controller') else None).start()
-                                    threading.Timer(3.0, lambda: light_bar.set_robot_state("idle")).start()
-                                except Exception as e:
-                                    logger.warning(f"Light bar detection effect failed: {e}")
+                                DETECTIONS = {
+                                    "front_camera": detections,
+                                    "rear_camera": DETECTIONS['rear_camera']
+                                }
+                                # Update mode manager with latest detection
+                                if mode_manager is not None:
+                                    mode_manager.update_detection(detections)
+                                # Set light bar to detection state if objects detected
+                                if detections:
+                                    try:
+                                        light_bar.set_robot_state("detection")
+                                        # Dim to normal brightness after 1 second, return to idle after 3 seconds
+                                        threading.Timer(1.0, lambda: light_bar.controller.controller.dim_to_normal() if hasattr(light_bar.controller, 'controller') else None).start()
+                                        threading.Timer(3.0, lambda: light_bar.set_robot_state("idle")).start()
+                                    except Exception as e:
+                                        logger.warning(f"Light bar detection effect failed: {e}")
 
-                            # logger.info('DETECTIONS: %s', DETECTIONS)
+                                # logger.info('DETECTIONS: %s', DETECTIONS)
 
-                            frame = output_main.read_frame()
-                        except Exception as e:  # pylint: disable=broad-except
-                            logger.error('Error processing frame: %s', e)
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error('Error: %s', e)
+                                frame = output_main.read_frame()
+                            except Exception as e:  # pylint: disable=broad-except
+                                logger.error('Error processing Hailo frame: %s', e)
+                                time.sleep(0.1)  # Brief pause before retry
+                                # Continue trying to process frames rather than failing completely
+            except Exception as e:  # pylint: disable=broad-except
+                retry_count += 1
+                logger.error(f'Hailo camera error (attempt {retry_count}/{max_retries}): {e}')
+                if retry_count < max_retries:
+                    logger.info(f'Retrying Hailo camera initialization in 2 seconds...')
+                    time.sleep(2)
+                else:
+                    logger.error('Max retries reached, Hailo camera thread stopping')
+                    break
 
     threading.Thread(target=camera_thread, daemon=True).start()
 
+    return output_main
+
+
+def run_basic_camera_0():
+    """
+    Run basic camera without AI detection when neither Hailo nor IMX500 are available
+    """
+    logger = logging.getLogger(__name__)
+    output_main = StreamingOutput()
+
+    def camera_thread():
+        try:
+            with Picamera2(camera_num=0) as picam2:
+                logger.info('Basic camera (no AI) initialized successfully')
+                video_w, video_h = 640, 480
+
+                main = {'size': (video_w, video_h), 'format': 'XRGB8888'}
+                controls = {'FrameRate': 30}
+                picamera_config = picam2.create_preview_configuration(main=main,
+                                                                     controls=controls)
+                picam2.configure(picamera_config)
+                picam2.start_recording(encoder=JpegEncoder(), output=FileOutput(output_main))
+                
+                logger.info('Basic camera thread running (no AI detection)')
+                while True:
+                    try:
+                        # No AI processing, just stream frames
+                        # Keep DETECTIONS empty for basic camera
+                        global DETECTIONS  # pylint: disable=global-statement
+                        DETECTIONS = {
+                            "front_camera": [],
+                            "rear_camera": DETECTIONS['rear_camera']
+                        }
+                        time.sleep(0.1)  # Basic frame rate control
+                    except Exception as e:  # pylint: disable=broad-except
+                        logger.error('Error in basic camera loop: %s', e)
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error('Critical basic camera error: %s', e)
+            logger.error('Basic camera thread failed, camera stream will stop')
+
+    threading.Thread(target=camera_thread, daemon=True).start()
     return output_main
 
 
@@ -833,42 +1236,53 @@ def start_camera_1() -> StreamingOutput:
     transform = libcamera.Transform(hflip=True, vflip=True)  # pylint: disable=no-member
 
     def camera_thread():
+        max_retries = 3
+        retry_count = 0
         recording = False
-        try:
-            with Picamera2(camera_num=1) as picam2:
-                cam1_config = {
-                    'size': resolution,
-                    'format': cformat
-                }
-                controls = {'FrameRate': frame_rate}
 
-                picamera_config = picam2.create_preview_configuration(
-                    main=cam1_config,
-                    controls=controls,
-                    transform=transform
-                )
-                picam2.configure(picamera_config)
+        while retry_count < max_retries:
+            try:
+                with Picamera2(camera_num=1) as picam2:
+                    cam1_config = {
+                        'size': resolution,
+                        'format': cformat
+                    }
+                    controls = {'FrameRate': frame_rate}
 
-                picam2.start_recording(encoder=JpegEncoder(), output=FileOutput(output_rear))
-                recording = True
-                logger.info("Camera 1 recording started.")
+                    picamera_config = picam2.create_preview_configuration(
+                        main=cam1_config,
+                        controls=controls,
+                        transform=transform
+                    )
+                    picam2.configure(picamera_config)
 
-                # Keep thread alive while recording
-                while running.is_set():
-                    if not running.wait(timeout=1):
-                        break
+                    picam2.start_recording(encoder=JpegEncoder(), output=FileOutput(output_rear))
+                    recording = True
+                    logger.info("Camera 1 recording started.")
 
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error('Camera thread encountered PiCameraError: %s', e)
-            if recording:
-                try:
-                    picam2.stop_recording()
+                    # Keep thread alive while recording
+                    while running.is_set():
+                        if not running.wait(timeout=1):
+                            break
+
+            except Exception as e:  # pylint: disable=broad-except
+                retry_count += 1
+                logger.error(f'Rear camera error (attempt {retry_count}/{max_retries}): {e}')
+                if recording:
+                    try:
+                        picam2.stop_recording()
+                    except:
+                        pass
+                if retry_count < max_retries:
+                    logger.info(f'Retrying rear camera initialization in 2 seconds...')
+                    time.sleep(2)
+                else:
+                    logger.error('Max retries reached, rear camera thread stopping')
                     logger.info("Camera 1 recording stopped due to error.")
-                except Exception as se:  # pylint: disable=broad-except
-                    logger.error('Error stopping recording: %s', se)
-        finally:
-            running.clear()
-            logger.info("Camera thread has been cleaned up.")
+
+        # Cleanup after all retry attempts
+        running.clear()
+        logger.info("Camera thread has been cleaned up.")
 
     thread = threading.Thread(target=camera_thread, daemon=True)
     thread.start()
@@ -920,58 +1334,141 @@ AUDIO_OUTPUT = None
 @app.route('/cam0')
 def cam0():
     """
-    Stream the front camera feed
+    Stream the front camera feed with IMX500 detection or basic fallback
     """
     logger = logging.getLogger(__name__)
     global FRONT_CAMERA_OUTPUT  # pylint: disable=global-statement
-    if FRONT_CAMERA_OUTPUT is None and DETECTIONS_USE_HAILO:
-        logger.info('Using Hailo for object detection')
-        FRONT_CAMERA_OUTPUT = run_detection_camera_0_hailo(
-            HAILO_DETECT_MODEL,
-            DETECT_LABELS,
-            SCORE_THRESH
-            )
-    elif FRONT_CAMERA_OUTPUT is None:
+
+    # Check if camera output is stale (no frames for 5 seconds)
+    if FRONT_CAMERA_OUTPUT is not None:
+        if hasattr(FRONT_CAMERA_OUTPUT, 'last_frame_time'):
+            if time.time() - FRONT_CAMERA_OUTPUT.last_frame_time > 5.0:
+                logger.warning('Front camera appears stale, reinitializing')
+                FRONT_CAMERA_OUTPUT = None
+
+    # Try IMX500 detection first, then fall back to basic camera
+    if FRONT_CAMERA_OUTPUT is None and IMX500_AVAILABLE:
         logger.info('Using IMX500 for object detection')
-        FRONT_CAMERA_OUTPUT = run_detection_camera_0_imx500()
+        try:
+            FRONT_CAMERA_OUTPUT = run_detection_camera_0_imx500()
+            logger.info('Successfully initialized IMX500 camera with detection')
+        except Exception as e:
+            logger.error(f'IMX500 camera initialization failed: {e}')
+            logger.info('Falling back to basic camera (no AI detection)')
+            try:
+                FRONT_CAMERA_OUTPUT = run_basic_camera_0()
+                logger.info('Successfully initialized basic camera as fallback')
+            except Exception as e2:
+                logger.error(f'Basic camera fallback failed: {e2}')
+                raise Exception(f'Camera initialization failed. IMX500: {e}, Basic: {e2}')
+    elif FRONT_CAMERA_OUTPUT is None:
+        logger.info('Using basic camera (IMX500 not available)')
+        try:
+            FRONT_CAMERA_OUTPUT = run_basic_camera_0()
+            logger.info('Successfully initialized basic camera')
+        except Exception as e:
+            logger.error(f'Basic camera initialization failed: {e}')
+            raise Exception(f'Basic camera initialization failed: {e}')
 
     def frame_generator():
         """
-        Generate frames from the front camera feed
+        Generate frames from the front camera feed with error handling
         """
-        while True:
-            frame = FRONT_CAMERA_OUTPUT.read_frame()
-            if frame is None:
-                continue
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        consecutive_failures = 0
+        max_failures = 10
 
-    return Response(frame_generator(), mimetype='multipart/x-mixed-replace; boundary=frame')
+        while True:
+            try:
+                frame = FRONT_CAMERA_OUTPUT.read_frame(timeout=0.5)
+                if frame is None:
+                    consecutive_failures += 1
+                    if consecutive_failures > max_failures:
+                        logger.warning('Too many consecutive frame failures, yielding empty frame')
+                        # Send a small empty JPEG to keep connection alive
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + b'\xff\xd8\xff\xd9' + b'\r\n')
+                        time.sleep(0.1)  # Small delay before retry
+                    continue
+                consecutive_failures = 0  # Reset on successful frame
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            except Exception as e:
+                logger.error(f'Frame generation error: {e}')
+                time.sleep(0.1)  # Small delay on error
+
+    try:
+        return Response(frame_generator(),
+                       mimetype='multipart/x-mixed-replace; boundary=frame',
+                       headers={
+                           'Cache-Control': 'no-cache, no-store, must-revalidate',
+                           'Pragma': 'no-cache',
+                           'Expires': '0',
+                           'Connection': 'close',
+                           'X-Accel-Buffering': 'no'  # Disable nginx buffering if present
+                       })
+    except Exception as e:
+        logger.error(f'Error creating video stream response: {e}')
+        return jsonify({'error': 'Failed to start video stream'}), 500
 
 
 @app.route('/cam1')
 def cam1():
     """
-    Stream the rear camera feed
+    Stream the rear camera feed with connection recovery
     """
     logger = logging.getLogger(__name__)
     global REAR_CAMERA_OUTPUT  # pylint: disable=global-statement
+
+    # Check if camera output is stale (no frames for 5 seconds)
+    if REAR_CAMERA_OUTPUT is not None:
+        if hasattr(REAR_CAMERA_OUTPUT, 'last_frame_time'):
+            if time.time() - REAR_CAMERA_OUTPUT.last_frame_time > 5.0:
+                logger.warning('Rear camera appears stale, reinitializing')
+                REAR_CAMERA_OUTPUT = None
+
     if REAR_CAMERA_OUTPUT is None:
         logger.info('Starting rear camera stream')
         REAR_CAMERA_OUTPUT = start_camera_1()
 
     def frame_generator():
         """
-        Generate frames from the rear camera feed
+        Generate frames from the rear camera feed with error handling
         """
-        while True:
-            frame = REAR_CAMERA_OUTPUT.read_frame()
-            if frame is None:
-                continue
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        consecutive_failures = 0
+        max_failures = 10
 
-    return Response(frame_generator(), mimetype='multipart/x-mixed-replace; boundary=frame')
+        while True:
+            try:
+                frame = REAR_CAMERA_OUTPUT.read_frame(timeout=0.5)
+                if frame is None:
+                    consecutive_failures += 1
+                    if consecutive_failures > max_failures:
+                        logger.warning('Too many consecutive frame failures, yielding empty frame')
+                        # Send a small empty JPEG to keep connection alive
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + b'\xff\xd8\xff\xd9' + b'\r\n')
+                        time.sleep(0.1)  # Small delay before retry
+                    continue
+                consecutive_failures = 0  # Reset on successful frame
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            except Exception as e:
+                logger.error(f'Frame generation error: {e}')
+                time.sleep(0.1)  # Small delay on error
+
+    try:
+        return Response(frame_generator(),
+                       mimetype='multipart/x-mixed-replace; boundary=frame',
+                       headers={
+                           'Cache-Control': 'no-cache, no-store, must-revalidate',
+                           'Pragma': 'no-cache',
+                           'Expires': '0',
+                           'Connection': 'close',
+                           'X-Accel-Buffering': 'no'  # Disable nginx buffering if present
+                       })
+    except Exception as e:
+        logger.error(f'Error creating video stream response: {e}')
+        return jsonify({'error': 'Failed to start video stream'}), 500
 
 
 @app.route('/api/motor/<string:direction>', methods=['GET', 'POST'])
@@ -1078,13 +1575,61 @@ def tilt(direction):
     return jsonify({'message': f"Tilted {direction} to {TILT_ANGLE}"}), 200
 
 
-@app.route('/api/tts/<string:text>', methods=['GET', 'POST'])
-def tts(text):
+@app.route('/api/tts', methods=['POST'])
+def tts():
     """
     Convert text to speech using Piper TTS
+    Accepts JSON body: {"text": "message to speak"}
     """
-    result = piper_tts(text)
-    return jsonify({'message': result}), 200  # Return JSON response with HTTP 200 status
+    logger = logging.getLogger(__name__)
+    try:
+        # Get text from JSON body (force=True handles JSON with special characters)
+        data = request.get_json(force=True, silent=False)
+        if not data or 'text' not in data:
+            logger.warning("TTS API received request without 'text' field")
+            return jsonify({'error': 'Request must include "text" field in JSON body'}), 400
+
+        text = data['text']
+
+        # Additional validation at API level
+        if not text or len(text.strip()) == 0:
+            logger.warning("TTS API received empty text")
+            return jsonify({'error': 'Text cannot be empty'}), 400
+
+        logger.info(f"TTS API called with text: '{text[:100]}{'...' if len(text) > 100 else ''}'")
+
+        result = piper_tts(text)
+
+        if result.startswith(("Invalid", "Text invalid", "Text too short")):
+            return jsonify({'error': result}), 400
+
+        return jsonify({'message': result}), 200
+
+    except Exception as e:
+        import traceback
+        logger.error(f"TTS API error: {e}")
+        logger.error(f"TTS API traceback: {traceback.format_exc()}")
+        return jsonify({'error': 'TTS processing failed'}), 500
+
+
+@app.route('/api/tts/welcome', methods=['POST'])
+def tts_welcome():
+    """
+    Play a playful welcome message for NerdBot
+    """
+    welcome_message = (
+        "Hello there! I'm NerdBot, your friendly robotic companion created by NerdyMark! "
+        "I'm equipped with advanced vision capabilities that let me see and understand the world around me. "
+        "You can control me through my intuitive web interface or with a Steam Controller for the ultimate gaming experience! "
+        "I can detect objects, track poses, play fun sounds, and even have conversations with you. "
+        "My servos give me the ability to look around, my motors let me zoom about, "
+        "and my LED lights and laser make me quite the showbot! "
+        "Whether you need a helpful assistant or just want to have some robotic fun, "
+        "I'm here to serve, entertain, and maybe cause a little mischief along the way! "
+        "Let's explore and create something awesome together!"
+    )
+    result = piper_tts(welcome_message)
+    return jsonify({'message': f'Welcome message played: {result}'}), 200
 
 
 @app.route('/api/headlights/toggle', methods=['GET', 'POST'])
@@ -1222,7 +1767,11 @@ def get_mode():
     """
     Get current robot mode
     """
-    return jsonify({'mode': mode_manager.get_mode()}), 200
+    from mode_manager import get_or_create_mode_manager
+    manager = get_or_create_mode_manager()
+    if manager is None:
+        return jsonify({'error': 'Mode manager not initialized'}), 500
+    return jsonify({'mode': manager.get_mode()}), 200
 
 
 @app.route('/api/mode/<string:mode>', methods=['POST'])
@@ -1230,11 +1779,34 @@ def set_mode(mode):
     """
     Set robot operational mode
     """
-    success = mode_manager.set_mode(mode)
+    from mode_manager import get_or_create_mode_manager
+    manager = get_or_create_mode_manager()
+    if manager is None:
+        return jsonify({'error': 'Mode manager not initialized'}), 500
+    
+    success = manager.set_mode(mode)
     if success:
-        return jsonify({'mode': mode_manager.get_mode(), 'message': f'Mode set to {mode}'}), 200
+        return jsonify({'mode': manager.get_mode(), 'message': f'Mode set to {mode}'}), 200
     else:
         return jsonify({'error': f'Invalid mode: {mode}'}), 400
+
+
+@app.route('/api/mode/cycle', methods=['POST'])
+def cycle_mode():
+    """
+    Cycle through available robot modes
+    """
+    from mode_manager import get_or_create_mode_manager
+    manager = get_or_create_mode_manager()
+    if manager is None:
+        return jsonify({'error': 'Mode manager not initialized'}), 500
+    
+    success = manager.cycle_mode()
+    if success:
+        current_mode = manager.get_mode()
+        return jsonify({'mode': current_mode, 'message': f'Cycled to {current_mode} mode'}), 200
+    else:
+        return jsonify({'error': 'Failed to cycle mode'}), 500
 
 
 @app.route('/api/light_bar/<string:command>', methods=['POST'])
@@ -1403,17 +1975,23 @@ def regenerate_meme_sound_thumbnail(sound_id):
     
     try:
         # Generate new thumbnail with force_regenerate=True to overwrite existing
-        thumbnail_path = thumbnail_generator.generate_thumbnail_for_sound(sound_file, force_regenerate=True)
-        
+        thumbnail_path, error_msg = thumbnail_generator.generate_thumbnail_for_sound(sound_file, force_regenerate=True)
+
         if thumbnail_path and os.path.exists(thumbnail_path):
-            return jsonify({
+            response = {
                 'success': True,
                 'message': f'Thumbnail regenerated for {sound_file}',
                 'thumbnail_url': f'/api/meme_sounds/thumbnail/{sound_id}?t={int(time.time())}'  # Add timestamp to bust cache
-            }), 200
+            }
+            # Include warning if there was an error but existing thumbnail was preserved
+            if error_msg:
+                response['warning'] = error_msg
+                app.logger.warning(f"Thumbnail preserved but not regenerated: {error_msg}")
+            return jsonify(response), 200
         else:
-            return jsonify({'error': 'Failed to generate thumbnail'}), 500
-            
+            error_message = error_msg or 'Failed to generate thumbnail'
+            return jsonify({'error': error_message}), 500
+
     except Exception as e:
         app.logger.error(f"Error regenerating thumbnail: {e}")
         return jsonify({'error': str(e)}), 500
@@ -1486,25 +2064,35 @@ def add_meme_sound_from_url():
             return jsonify({'error': f'Failed to convert audio file: {str(e)}'}), 500
         
         # Generate thumbnail for the new sound
+        thumbnail_warning = None
         try:
-            thumbnail_path = thumbnail_generator.generate_thumbnail_for_sound(filename)
+            thumbnail_path, error_msg = thumbnail_generator.generate_thumbnail_for_sound(filename)
             if thumbnail_path:
-                logger.info(f'Successfully generated thumbnail for {filename}')
+                if error_msg:
+                    logger.warning(f'Thumbnail generated with warning for {filename}: {error_msg}')
+                    thumbnail_warning = error_msg
+                else:
+                    logger.info(f'Successfully generated thumbnail for {filename}')
             else:
                 logger.warning(f'Failed to generate thumbnail for {filename}')
+                thumbnail_warning = error_msg or 'Failed to generate thumbnail'
         except Exception as e:
             logger.error(f'Error generating thumbnail for {filename}: {e}')
+            thumbnail_warning = f'Error generating thumbnail: {str(e)}'
             # Don't fail the whole request if thumbnail generation fails
         
         global MEME_SOUNDS
         # Update the global MEME_SOUNDS list
         MEME_SOUNDS = [f for f in os.listdir(MEME_SOUNDS_FOLDER_CONVERTED) if os.path.isfile(os.path.join(MEME_SOUNDS_FOLDER_CONVERTED, f))]
         
-        return jsonify({
+        response = {
             'message': f'Successfully added sound: {filename}',
             'filename': filename,
             'converted_path': converted_path
-        }), 200
+        }
+        if thumbnail_warning:
+            response['warning'] = thumbnail_warning
+        return jsonify(response), 200
         
     except HTTPError as e:
         logger.error(f'HTTP error downloading from URL: {e}')
@@ -1604,59 +2192,130 @@ def delete_meme_sound(sound_id):
         return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
 
-def convert_sound_file(sound_file):
+def convert_sound_file(sound_file, force_reconvert=False):
     """
-    Convert the sound file to the preferred format with the correct sample
-    rate using wave and pyaudio
+    Convert the sound file to the preferred format with volume normalization
     """
     logger = logging.getLogger(__name__)
     meme_audio = open(MEME_SOUNDS_FOLDER + sound_file, 'rb').read()
     out_file = MEME_SOUNDS_FOLDER_CONVERTED + sound_file
 
-    if os.path.exists(out_file):
+    if os.path.exists(out_file) and not force_reconvert:
         return out_file
 
     if not os.path.exists(MEME_SOUNDS_FOLDER_CONVERTED):
         os.makedirs(MEME_SOUNDS_FOLDER_CONVERTED)
 
-    meme_audio = AudioSegment.from_mp3(io.BytesIO(meme_audio))
-    meme_audio = meme_audio.set_frame_rate(AUDIO_RATE)
-    meme_audio = meme_audio.set_channels(1)
-    meme_audio = meme_audio.set_sample_width(2)
-    meme_audio.export(MEME_SOUNDS_FOLDER_CONVERTED + sound_file, format='mp3')
-    logger.info('Converted %s', sound_file)
-    return out_file
+    try:
+        # Load audio file
+        meme_audio = AudioSegment.from_mp3(io.BytesIO(meme_audio))
+        
+        # Normalize format first
+        meme_audio = meme_audio.set_frame_rate(AUDIO_RATE)
+        meme_audio = meme_audio.set_channels(1)
+        meme_audio = meme_audio.set_sample_width(2)
+        
+        # Volume normalization - normalize loudest part to 110% of max amplitude
+        # Get the peak amplitude in dBFS (decibels relative to full scale)
+        peak_amplitude = meme_audio.max_dBFS
+
+        if peak_amplitude != float('-inf'):  # Check if audio has sound
+            # Target is +0.8 dBFS (about 110% of max amplitude)
+            target_dBFS = 0.8
+            # Calculate gain needed to reach target
+            gain_needed = target_dBFS - peak_amplitude
+            
+            # Apply gain (normalize volume)
+            meme_audio = meme_audio + gain_needed
+            logger.info(f'Normalized {sound_file}: peak was {peak_amplitude:.1f}dBFS, applied {gain_needed:.1f}dB gain')
+        else:
+            logger.warning(f'Audio file {sound_file} appears to be silent, skipping normalization')
+        
+        # Export normalized audio
+        meme_audio.export(MEME_SOUNDS_FOLDER_CONVERTED + sound_file, format='mp3')
+        logger.info('Converted and normalized %s', sound_file)
+        return out_file
+        
+    except Exception as e:
+        logger.error(f'Error converting {sound_file}: {e}')
+        # Fallback to original conversion without normalization
+        meme_audio = AudioSegment.from_mp3(io.BytesIO(meme_audio))
+        meme_audio = meme_audio.set_frame_rate(AUDIO_RATE)
+        meme_audio = meme_audio.set_channels(1)
+        meme_audio = meme_audio.set_sample_width(2)
+        meme_audio.export(MEME_SOUNDS_FOLDER_CONVERTED + sound_file, format='mp3')
+        logger.info('Converted %s (fallback mode)', sound_file)
+        return out_file
 
 
-def convert_all_sound_files():
+def convert_all_sound_files(force_reconvert=False):
     """
     Convert all the sound files in the MEME_SOUNDS_FOLDER to the preferred format
     """
     logger = logging.getLogger(__name__)
     for sound in MEME_SOUNDS:
         logger.info('Converting %s', sound)
-        convert_sound_file(sound)
+        convert_sound_file(sound, force_reconvert=force_reconvert)
 
 
 # Initialize the optimized tracker
 tracker = OptimizedTracker(servos)
 
+# Global flag to track if detection tracking is running
+tracking_thread_running = False
+
 # Start the detection tracking job on server startup
-@scheduler.task('date', id='track_detections_startup', next_run_time=datetime.now() + timedelta(seconds=10))  # pylint: disable=line-too-long
+@scheduler.task('interval', id='track_detections_startup', seconds=30, next_run_time=datetime.now() + timedelta(seconds=10))  # pylint: disable=line-too-long
 def track_detections_front_startup():
     """
     Track the detections in the front camera feed using optimized tracker
     """
+    global tracking_thread_running
     logger = logging.getLogger(__name__)
+
+    # Only start tracking if not already running
+    if tracking_thread_running:
+        logger.debug('Tracking already running, skipping')
+        return
+
+    tracking_thread_running = True
     logger.info('Starting optimized detection tracking')
     labels = imx500_get_labels()
+
+    def tracking_loop():
+        """Main tracking loop that runs continuously"""
+        global tracking_thread_running
+        try:
+            _run_tracking_loop(logger, labels)
+        except Exception as e:
+            logger.error(f'Tracking loop crashed: {e}')
+        finally:
+            tracking_thread_running = False
+            logger.info('Tracking loop stopped')
+
+    # Start tracking in a separate thread
+    import threading
+    tracking_thread = threading.Thread(target=tracking_loop, daemon=True)
+    tracking_thread.start()
+    logger.info('Tracking thread started')
+
+def _run_tracking_loop(logger, labels):
     
-    # Update rate for stable tracking (reduced for smoother coordination)
-    update_interval = 0.1
+    # Update rate for ULTRA cat-like responsive tracking
+    update_interval = 0.02  # Maximum speed update rate (50Hz) for instant response
     
     while True:
         # Only track if in a follow mode or idle mode
-        current_mode = mode_manager.get_mode()
+        try:
+            if mode_manager is not None:
+                current_mode = mode_manager.get_mode()
+            else:
+                # Use fallback mode if mode_manager is not available
+                current_mode = 'idle'
+        except Exception as e:
+            logger.warning(f'Error getting mode: {e}, defaulting to idle')
+            current_mode = 'idle'
+
         if current_mode in ['detect_and_follow', 'detect_and_follow_wheels', 'idle']:
             largest_object = None
             largest_object_label = None
@@ -1852,7 +2511,24 @@ def visual_awareness():
     ]
 
     logger = logging.getLogger(__name__)
-    
+
+    # Check rate limit before processing
+    if not gemini_vision_rate_limiter.can_make_request():
+        wait_time = int(gemini_vision_rate_limiter.get_wait_time())
+        rate_limit_msg = f"🤖 Beep boop! My visual processors are cooling down. Please wait {wait_time} seconds before asking me to look around again! 🔥 (Rate limit: {wait_time}s)"
+        logger.warning(f'Gemini vision request rate limited. Wait {wait_time}s')
+        results[0]['front'] = rate_limit_msg
+        results[0]['rear'] = rate_limit_msg
+        return results
+
+    # Check if cameras are initialized
+    if FRONT_CAMERA_OUTPUT is None or REAR_CAMERA_OUTPUT is None:
+        camera_error_msg = "🤖 Camera system not initialized. My eyes aren't ready yet! 📷 (Camera initialization required)"
+        logger.error('Camera outputs not initialized')
+        results[0]['front'] = camera_error_msg
+        results[0]['rear'] = camera_error_msg
+        return results
+
     try:
         # Get the front camera feed
         front_image = FRONT_CAMERA_OUTPUT.read_frame()
@@ -1868,11 +2544,18 @@ def visual_awareness():
             logger.info('Front Camera Results: %s', front_results)
             results[0]['front'] = front_results.text
         except Exception as e:
-            if "quota" in str(e).lower() or "429" in str(e):
-                results[0]['front'] = "🤖 Oops! My visual processing quota is temporarily exhausted. Even robots need a coffee break sometimes! ☕"
+            error_str = str(e).lower()
+            if "quota" in error_str or "429" in error_str or "rate limit" in error_str:
+                results[0]['front'] = "🤖 Oops! My visual processing quota is temporarily exhausted. Even robots need a coffee break sometimes! ☕ (API rate limit reached)"
                 logger.warning('Front camera vision quota exceeded: %s', str(e))
+            elif "404" in error_str or "not found" in error_str:
+                results[0]['front'] = "🤖 Vision model unavailable. The AI service needs an update! 🔧 (Model error)"
+                logger.error('Front camera vision model error: %s', str(e))
+            elif "camera" in error_str or "image" in error_str:
+                results[0]['front'] = "🤖 Camera feed issue detected. Check my camera connections! 📷 (Camera error)"
+                logger.error('Front camera feed error: %s', str(e))
             else:
-                results[0]['front'] = "🤖 Visual processing temporarily unavailable. My circuits are having a moment! ⚡"
+                results[0]['front'] = f"🤖 Visual processing error: {str(e)[:100]}... ⚡"
                 logger.error('Front camera vision error: %s', str(e))
 
         # Process the rear camera feed
@@ -1881,11 +2564,18 @@ def visual_awareness():
             logger.info('Rear Camera Results: %s', rear_results)
             results[0]['rear'] = rear_results.text
         except Exception as e:
-            if "quota" in str(e).lower() or "429" in str(e):
-                results[0]['rear'] = "🤖 Oops! My visual processing quota is temporarily exhausted. Even robots need a coffee break sometimes! ☕"
+            error_str = str(e).lower()
+            if "quota" in error_str or "429" in error_str or "rate limit" in error_str:
+                results[0]['rear'] = "🤖 Oops! My visual processing quota is temporarily exhausted. Even robots need a coffee break sometimes! ☕ (API rate limit reached)"
                 logger.warning('Rear camera vision quota exceeded: %s', str(e))
+            elif "404" in error_str or "not found" in error_str:
+                results[0]['rear'] = "🤖 Vision model unavailable. The AI service needs an update! 🔧 (Model error)"
+                logger.error('Rear camera vision model error: %s', str(e))
+            elif "camera" in error_str or "image" in error_str:
+                results[0]['rear'] = "🤖 Camera feed issue detected. Check my camera connections! 📷 (Camera error)"
+                logger.error('Rear camera feed error: %s', str(e))
             else:
-                results[0]['rear'] = "🤖 Visual processing temporarily unavailable. My circuits are having a moment! ⚡"
+                results[0]['rear'] = f"🤖 Visual processing error: {str(e)[:100]}... ⚡"
                 logger.error('Rear camera vision error: %s', str(e))
 
     except Exception as e:
@@ -1952,6 +2642,197 @@ def reset_tracker():
     tracker.reset()
     return jsonify({'message': 'Tracker reset to center'}), 200
 
+@app.route('/api/tracker/start', methods=['POST'])
+def start_tracking():
+    """
+    Manually start the tracking function
+    """
+    global tracking_thread_running
+    logger = logging.getLogger(__name__)
+
+    if tracking_thread_running:
+        return jsonify({'message': 'Tracking already running'}), 200
+
+    try:
+        track_detections_front_startup()
+        return jsonify({'message': 'Tracking started successfully'}), 200
+    except Exception as e:
+        logger.error(f'Failed to start tracking: {e}')
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/tracker/status', methods=['GET'])
+def tracking_status():
+    """
+    Get tracking status
+    """
+    global tracking_thread_running
+    return jsonify({
+        'tracking_running': tracking_thread_running,
+        'mode': mode_manager.get_mode() if mode_manager is not None else 'unknown'
+    }), 200
+
+
+@app.route('/api/volume', methods=['GET'])
+def get_volume():
+    """
+    Get current system volume
+    """
+    logger = logging.getLogger(__name__)
+    try:
+        # Try different mixer controls in order of preference
+        controls_to_try = [
+            ['amixer', '-c', str(AUDIO_DEVICE_INDEX), 'sget', 'Anker PowerConf S330'],  # USB audio device
+            ['amixer', 'sget', 'Master'],  # Fallback to Master if it exists
+            ['amixer', 'sget', 'PCM'],  # Another common control
+        ]
+
+        result = None
+        for cmd in controls_to_try:
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                if result.returncode == 0:
+                    break
+            except subprocess.CalledProcessError:
+                continue
+
+        if not result or result.returncode != 0:
+            # If no mixer control works, return a default response
+            logger.warning('No audio mixer control found')
+            return jsonify({'volume': 50, 'muted': False, 'status': 'warning', 'message': 'No audio mixer control found'}), 200
+
+        # Parse volume percentage from output
+        import re
+        volume_match = re.search(r'\[(\d+)%\]', result.stdout)
+        mute_match = re.search(r'\[(on|off)\]', result.stdout)
+
+        if volume_match:
+            volume = int(volume_match.group(1))
+            muted = mute_match.group(1) == 'off' if mute_match else False
+
+            return jsonify({
+                'volume': volume,
+                'muted': muted,
+                'status': 'success'
+            }), 200
+        else:
+            return jsonify({'error': 'Could not parse volume'}), 500
+
+    except subprocess.CalledProcessError as e:
+        logger.error(f'Error getting volume: {e}')
+        return jsonify({'error': 'Failed to get volume'}), 500
+    except Exception as e:
+        logger.error(f'Unexpected error getting volume: {e}')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/volume', methods=['POST'])
+def set_volume():
+    """
+    Set system volume
+    """
+    logger = logging.getLogger(__name__)
+    try:
+        data = request.get_json()
+        if not data or 'volume' not in data:
+            return jsonify({'error': 'Volume parameter required'}), 400
+
+        volume = data['volume']
+
+        # Validate volume range
+        if not isinstance(volume, int) or volume < 0 or volume > 100:
+            return jsonify({'error': 'Volume must be an integer between 0 and 100'}), 400
+
+        # Try different mixer controls in order of preference
+        controls_to_try = [
+            ['amixer', '-c', str(AUDIO_DEVICE_INDEX), 'sset', 'Anker PowerConf S330', f'{volume}%'],  # USB audio device
+            ['amixer', 'sset', 'Master', f'{volume}%'],  # Fallback to Master if it exists
+            ['amixer', 'sset', 'PCM', f'{volume}%'],  # Another common control
+        ]
+
+        success = False
+        last_error = None
+        for cmd in controls_to_try:
+            try:
+                subprocess.run(cmd, check=True, capture_output=True)
+                success = True
+                break
+            except subprocess.CalledProcessError as e:
+                last_error = e
+                continue
+
+        if not success:
+            logger.error(f'Failed to set volume on any audio control: {last_error}')
+            return jsonify({'error': 'Failed to set volume - no compatible audio control found'}), 500
+
+        logger.info(f'Volume set to {volume}%')
+        return jsonify({
+            'volume': volume,
+            'status': 'success',
+            'message': f'Volume set to {volume}%'
+        }), 200
+
+    except subprocess.CalledProcessError as e:
+        logger.error(f'Error setting volume: {e}')
+        return jsonify({'error': 'Failed to set volume'}), 500
+    except Exception as e:
+        logger.error(f'Unexpected error setting volume: {e}')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/volume/mute', methods=['POST'])
+def toggle_mute():
+    """
+    Toggle system mute
+    """
+    logger = logging.getLogger(__name__)
+    try:
+        # Try different mixer controls in order of preference
+        controls_to_try = [
+            ['amixer', '-c', str(AUDIO_DEVICE_INDEX), 'sset', 'Anker PowerConf S330', 'toggle'],  # USB audio device
+            ['amixer', 'sset', 'Master', 'toggle'],  # Fallback to Master if it exists
+            ['amixer', 'sset', 'PCM', 'toggle'],  # Another common control
+        ]
+
+        result = None
+        for cmd in controls_to_try:
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                if result.returncode == 0:
+                    break
+            except subprocess.CalledProcessError:
+                continue
+
+        if not result or result.returncode != 0:
+            logger.error('Failed to toggle mute on any audio control')
+            return jsonify({'error': 'Failed to toggle mute - no compatible audio control found'}), 500
+
+        # Parse mute status from output
+        import re
+        mute_match = re.search(r'\[(on|off)\]', result.stdout)
+        volume_match = re.search(r'\[(\d+)%\]', result.stdout)
+
+        if mute_match and volume_match:
+            muted = mute_match.group(1) == 'off'
+            volume = int(volume_match.group(1))
+
+            status_msg = 'muted' if muted else 'unmuted'
+            logger.info(f'Audio {status_msg}')
+            return jsonify({
+                'muted': muted,
+                'volume': volume,
+                'status': 'success',
+                'message': f'Audio {status_msg}'
+            }), 200
+        else:
+            return jsonify({'error': 'Could not parse mute status'}), 500
+
+    except subprocess.CalledProcessError as e:
+        logger.error(f'Error toggling mute: {e}')
+        return jsonify({'error': 'Failed to toggle mute'}), 500
+    except Exception as e:
+        logger.error(f'Unexpected error toggling mute: {e}')
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/health', methods=['GET', 'POST'])
 def health():
@@ -1959,6 +2840,88 @@ def health():
     Health check for watchdog
     """
     return jsonify({'message': 'Healthy'}), 200
+
+
+@app.route('/api/camera/status', methods=['GET'])
+def camera_status():
+    """
+    Get current camera system status
+    """
+    global FRONT_CAMERA_OUTPUT
+    
+    # Determine actual camera type being used
+    camera_type = 'basic'  # Default fallback
+    if IMX500_AVAILABLE:
+        camera_type = 'imx500'
+
+    status = {
+        'hailo_available': False,  # Hailo support removed
+        'imx500_available': IMX500_AVAILABLE,
+        'hailo_enabled': False,  # Hailo support removed
+        'camera_initialized': FRONT_CAMERA_OUTPUT is not None,
+        'camera_type': camera_type,
+        'ai_detection_available': HAILO_AVAILABLE or IMX500_AVAILABLE
+    }
+    
+    return jsonify(status), 200
+
+
+@app.route('/api/camera/fallback', methods=['POST'])
+def camera_fallback():
+    """
+    Manually trigger fallback from Hailo to IMX500 camera
+    """
+    global FRONT_CAMERA_OUTPUT
+    logger = logging.getLogger(__name__)
+    
+    # Already using IMX500 or basic camera (Hailo removed)
+    try:
+        logger.info('Camera fallback requested')
+
+        # Reset camera output
+        FRONT_CAMERA_OUTPUT = None
+        
+        # Initialize IMX500
+        FRONT_CAMERA_OUTPUT = run_detection_camera_0_imx500()
+        logger.info('Successfully switched to IMX500 camera')
+        
+        return jsonify({
+            'message': 'Successfully switched to IMX500 camera',
+            'camera_type': 'imx500',
+            'hailo_enabled': False
+        }), 200
+        
+    except Exception as e:
+        logger.error(f'Manual fallback failed: {e}')
+        return jsonify({'error': f'Fallback failed: {e}'}), 500
+
+
+@app.route('/api/camera/reset', methods=['POST'])
+def camera_reset():
+    """
+    Reset camera system (try Hailo first, fallback to IMX500 if needed)
+    """
+    global FRONT_CAMERA_OUTPUT
+    logger = logging.getLogger(__name__)
+    
+    try:
+        logger.info('Camera system reset requested')
+        
+        # Reset camera output
+        FRONT_CAMERA_OUTPUT = None
+        # Hailo support removed - will use IMX500 or basic camera
+
+        # This will trigger reinitialization in cam0() route when next accessed
+        logger.info('Camera system reset, will reinitialize on next access')
+
+        return jsonify({
+            'message': 'Camera system reset, will use IMX500 or basic camera',
+            'hailo_enabled': False  # Hailo support removed
+        }), 200
+        
+    except Exception as e:
+        logger.error(f'Camera reset failed: {e}')
+        return jsonify({'error': f'Camera reset failed: {e}'}), 500
 
 
 def cleanup_gpio():
@@ -2189,6 +3152,178 @@ def gpio_status():
         }), 500
 
 
+@app.route('/api/meme_sounds/reconvert/<int:sound_id>', methods=['POST'])
+def reconvert_meme_sound(sound_id):
+    """
+    Re-convert a specific sound file with updated normalization
+    """
+    global MEME_SOUNDS
+    logger = logging.getLogger(__name__)
+    
+    try:
+        if sound_id < 0 or sound_id >= len(MEME_SOUNDS):
+            return jsonify({'error': 'Invalid sound ID'}), 400
+        
+        filename = MEME_SOUNDS[sound_id]
+        logger.info(f'Re-converting sound: {filename}')
+        
+        # Check if original file exists
+        original_path = os.path.join(MEME_SOUNDS_FOLDER, filename)
+        if not os.path.exists(original_path):
+            return jsonify({'error': f'Original file not found: {filename}'}), 404
+        
+        # Force reconversion with normalization
+        converted_path = convert_sound_file(filename, force_reconvert=True)
+        
+        # Regenerate thumbnail after reconversion
+        thumbnail_warning = None
+        try:
+            thumbnail_path, error_msg = thumbnail_generator.generate_thumbnail_for_sound(filename, force_regenerate=True)
+            if error_msg:
+                logger.warning(f'Thumbnail regenerated with warning for {filename}: {error_msg}')
+                thumbnail_warning = error_msg
+            else:
+                logger.info(f'Regenerated thumbnail for re-converted sound: {filename}')
+        except Exception as e:
+            logger.warning(f'Failed to regenerate thumbnail after reconversion: {e}')
+            thumbnail_warning = f'Failed to regenerate thumbnail: {str(e)}'
+        
+        response = {
+            'message': f'Successfully re-converted and normalized sound: {filename}',
+            'filename': filename,
+            'converted_path': converted_path
+        }
+        if thumbnail_warning:
+            response['warning'] = thumbnail_warning
+        return jsonify(response), 200
+        
+    except Exception as e:
+        logger.error(f'Error re-converting sound: {e}')
+        return jsonify({'error': f'Re-conversion failed: {str(e)}'}), 500
+
+
+@app.route('/api/meme_sounds/reconvert_all', methods=['POST'])
+def reconvert_all_meme_sounds():
+    """
+    Re-convert all sound files with updated normalization
+    """
+    logger = logging.getLogger(__name__)
+    
+    try:
+        logger.info('Re-converting all sound files with normalization')
+        
+        # Force reconversion of all sounds
+        convert_all_sound_files(force_reconvert=True)
+        
+        return jsonify({
+            'message': f'Successfully re-converted {len(MEME_SOUNDS)} sound files',
+            'count': len(MEME_SOUNDS)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f'Error re-converting all sounds: {e}')
+        return jsonify({'error': f'Bulk re-conversion failed: {str(e)}'}), 500
+
+
+@app.route('/api/meme_sounds/rename/<int:sound_id>', methods=['POST'])
+def rename_meme_sound(sound_id):
+    """
+    Rename a meme sound file (both original and converted versions)
+    """
+    global MEME_SOUNDS
+    logger = logging.getLogger(__name__)
+    
+    try:
+        if sound_id < 0 or sound_id >= len(MEME_SOUNDS):
+            return jsonify({'error': 'Invalid sound ID'}), 400
+        
+        data = request.get_json()
+        if not data or 'new_name' not in data:
+            return jsonify({'error': 'Missing new_name in request body'}), 400
+        
+        new_name = data['new_name'].strip()
+        if not new_name:
+            return jsonify({'error': 'New name cannot be empty'}), 400
+        
+        # Ensure .mp3 extension
+        if not new_name.lower().endswith('.mp3'):
+            new_name += '.mp3'
+        
+        # Sanitize filename (remove invalid characters)
+        import re
+        new_name = re.sub(r'[<>:"/\\|?*]', '_', new_name)
+        
+        old_filename = MEME_SOUNDS[sound_id]
+        logger.info(f'Renaming sound: {old_filename} -> {new_name}')
+        
+        # Check if new name already exists
+        if new_name in MEME_SOUNDS:
+            return jsonify({'error': f'A sound with name "{new_name}" already exists'}), 409
+        
+        # Construct file paths
+        old_original_path = os.path.join(MEME_SOUNDS_FOLDER, old_filename)
+        new_original_path = os.path.join(MEME_SOUNDS_FOLDER, new_name)
+        old_converted_path = os.path.join(MEME_SOUNDS_FOLDER_CONVERTED, old_filename)
+        new_converted_path = os.path.join(MEME_SOUNDS_FOLDER_CONVERTED, new_name)
+        
+        # Rename files
+        renamed_files = []
+        errors = []
+        
+        # Rename original file if it exists
+        if os.path.exists(old_original_path):
+            try:
+                os.rename(old_original_path, new_original_path)
+                renamed_files.append(f'original: {old_filename} -> {new_name}')
+            except OSError as e:
+                errors.append(f'Failed to rename original file: {e}')
+        
+        # Rename converted file if it exists
+        if os.path.exists(old_converted_path):
+            try:
+                os.rename(old_converted_path, new_converted_path)
+                renamed_files.append(f'converted: {old_filename} -> {new_name}')
+            except OSError as e:
+                errors.append(f'Failed to rename converted file: {e}')
+        
+        # Also rename thumbnail if it exists
+        old_thumb_path = os.path.join(MEME_SOUNDS_FOLDER_CONVERTED, 'meme_thumbnails', 
+                                     old_filename.replace('.mp3', '.png'))
+        new_thumb_path = os.path.join(MEME_SOUNDS_FOLDER_CONVERTED, 'meme_thumbnails', 
+                                     new_name.replace('.mp3', '.png'))
+        if os.path.exists(old_thumb_path):
+            try:
+                os.rename(old_thumb_path, new_thumb_path)
+                renamed_files.append(f'thumbnail: {old_filename}.png -> {new_name}.png')
+            except OSError as e:
+                errors.append(f'Failed to rename thumbnail: {e}')
+        
+        # Update the global MEME_SOUNDS list
+        MEME_SOUNDS = [f for f in os.listdir(MEME_SOUNDS_FOLDER_CONVERTED) 
+                       if f.endswith('.mp3') and os.path.isfile(os.path.join(MEME_SOUNDS_FOLDER_CONVERTED, f))]
+        
+        if renamed_files:
+            message = f'Successfully renamed sound to: {new_name}'
+            if errors:
+                message += f' (with warnings: {"; ".join(errors)})'
+            return jsonify({
+                'message': message,
+                'old_name': old_filename,
+                'new_name': new_name,
+                'renamed_files': renamed_files,
+                'warnings': errors if errors else None
+            }), 200
+        else:
+            return jsonify({
+                'error': f'No files found to rename for sound: {old_filename}',
+                'errors': errors
+            }), 404
+        
+    except Exception as e:
+        logger.error(f'Error renaming sound: {e}')
+        return jsonify({'error': f'Rename failed: {str(e)}'}), 500
+
+
 @app.route('/')
 def index():
     """
@@ -2206,25 +3341,42 @@ if __name__ == '__main__':
     servos.reset_servos()
     convert_all_sound_files()
 
-    # Enable integrated joystick control (zero-latency)
+    # Ensure all motors are stopped before enabling joystick control
     try:
-        motors.enable_joystick_control()
-        servos.enable_joystick_control()
-        from joystick_input_manager import get_input_manager
-        input_manager = get_input_manager()
-        if input_manager.start():
-            logging.info('Integrated joystick control enabled')
-        else:
-            logging.warning('Joystick controller not found - API control only')
+        motors.stop()
+        logging.info('Motors stopped during startup initialization')
     except Exception as e:
-        logging.warning(f'Joystick integration failed: {e} - API control only')
+        logging.warning(f'Failed to stop motors during startup: {e}')
+
+    # NOTE: Joystick control is now handled by separate nerdbot-joystick service
+    # to avoid conflicts. The integrated joystick control below is disabled.
+    # 
+    # # Enable integrated joystick control (zero-latency)
+    # try:
+    #     motors.enable_joystick_control()
+    #     servos.enable_joystick_control()
+    #     from joystick_input_manager import get_input_manager
+    #     input_manager = get_input_manager()
+    #     if input_manager.start():
+    #         logging.info('Integrated joystick control enabled')
+    #     else:
+    #         logging.warning('Joystick controller not found - API control only')
+    # except Exception as e:
+    #     logging.warning(f'Joystick integration failed: {e} - API control only')
+    
+    logging.info('Joystick control handled by separate nerdbot-joystick service')
 
     # Start the front camera stream
     # cam0()
 
-    # Start a thread to track the largest object in the front camera feed
-    threading.Thread(target=track_detections_front_startup, daemon=True).start()
-    logging.info('Detection tracking started')
+    # NOTE: Automated detection tracking is disabled to prevent conflicts with joystick control
+    # The detection tracking system competes with joystick motor commands causing chattering
+    #
+    # # Start a thread to track the largest object in the front camera feed
+    # threading.Thread(target=track_detections_front_startup, daemon=True).start()
+    # logging.info('Detection tracking started')
+    
+    logging.info('Automated detection tracking disabled - joystick control only')
     # threading.Thread(target=audio_stream, daemon=True).start()
     # logging.info('Audio stream started')
 
@@ -2236,5 +3388,17 @@ if __name__ == '__main__':
     #     dev = p.get_device_info_by_index(i)
     #     if dev['maxInputChannels'] > 0:
     #         logging.info('Input Device, index: %s, name: %s', i, dev['name'])
+
+    # Add delayed motor stop to ensure all motors are stopped after initialization
+    def delayed_motor_stop():
+        time.sleep(1.0)  # Wait for all initialization to complete
+        try:
+            motors.stop()
+            logging.info('Delayed motor stop completed - all motors should be stopped')
+        except Exception as e:
+            logging.warning(f'Delayed motor stop failed: {e}')
+    
+    # Start delayed stop in background thread
+    threading.Thread(target=delayed_motor_stop, daemon=True).start()
 
     app.run(debug=False, host = '0.0.0.0', port=5000)

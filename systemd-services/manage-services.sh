@@ -1,7 +1,7 @@
 #!/bin/bash
 # NerdBot Service Management Script
 
-SERVICES="nerdbot-fan nerdbot-flask nerdbot-ui nerdbot-tts nerdbot-joystick nerdbot-darkice"
+SERVICES="nerdbot-fan nerdbot-flask nerdbot-ui nerdbot-tts nerdbot-joystick nerdbot-darkice nerdbot-audio"
 
 case "$1" in
     start)

@@ -42,26 +42,30 @@ class ThumbnailGenerator:
         return name.strip()
     
     def generate_image_with_nano_banana(self, filename, force_regenerate=False):
-        """Generate thumbnail image using Google's Nano Banana API"""
+        """Generate thumbnail image using Google's Nano Banana API
+
+        Returns:
+            tuple: (thumbnail_path, error_message) where error_message is None on success
+        """
         clean_name = self.clean_filename(filename)
         thumbnail_path = os.path.join(THUMBNAIL_FOLDER, f"{os.path.splitext(filename)[0]}.png")
-        
+
         # Skip if thumbnail already exists and not forcing regeneration
         if os.path.exists(thumbnail_path) and not force_regenerate:
             self.logger.info("Thumbnail already exists for %s", filename)
-            return thumbnail_path
-        
+            return (thumbnail_path, None)
+
         # Create a descriptive prompt for image generation
         prompt = f"""Simple emoji-style icon representing "{clean_name}". Flat design, bright colors, minimalist, no text, thumbnail size, fun and playful style suitable for a meme soundboard."""
 
         try:
             # Use the correct endpoint for Nano Banana (Gemini 2.5 Flash Image)
             url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent"
-            
+
             headers = {
                 'Content-Type': 'application/json'
             }
-            
+
             payload = {
                 "contents": [{
                     "parts": [
@@ -69,14 +73,14 @@ class ThumbnailGenerator:
                     ]
                 }]
             }
-            
+
             response = requests.post(
-                f"{url}?key={GOOGLE_GEMINI_KEY}", 
-                headers=headers, 
+                f"{url}?key={GOOGLE_GEMINI_KEY}",
+                headers=headers,
                 json=payload,
                 timeout=30
             )
-            
+
             if response.status_code == 200:
                 result = response.json()
                 if 'candidates' in result and result['candidates']:
@@ -85,36 +89,63 @@ class ThumbnailGenerator:
                         if 'inlineData' in part and part['inlineData']['mimeType'].startswith('image/'):
                             # Get the base64 encoded image
                             image_data = part['inlineData']['data']
-                            
+
                             # Decode and save the image
                             image_bytes = base64.b64decode(image_data)
-                            
+
                             # Open and resize to thumbnail size
                             img = Image.open(io.BytesIO(image_bytes))
                             img = img.resize(self.thumbnail_size, Image.Resampling.LANCZOS)
                             img.save(thumbnail_path, 'PNG')
-                            
+
                             self.logger.info("Generated thumbnail with Nano Banana: %s", thumbnail_path)
-                            return thumbnail_path
-                
-                self.logger.warning("No image data received from Nano Banana, using fallback")
-                return self.create_fallback_thumbnail(filename, clean_name, force_regenerate)
+                            return (thumbnail_path, None)
+
+                error_msg = "No image data received from Gemini API"
+                self.logger.warning("%s, preserving existing thumbnail if available", error_msg)
+                # If thumbnail exists, preserve it; otherwise create fallback
+                if os.path.exists(thumbnail_path):
+                    return (thumbnail_path, error_msg)
+                return self.create_fallback_thumbnail(filename, clean_name, force_regenerate, error_msg)
+            elif response.status_code == 429:
+                error_msg = "Gemini API quota exceeded - thumbnail generation unavailable"
+                self.logger.error("%s: %s", error_msg, response.text[:200])
+                # Preserve existing thumbnail if available
+                if os.path.exists(thumbnail_path):
+                    self.logger.info("Preserving existing thumbnail for %s", filename)
+                    return (thumbnail_path, error_msg)
+                # Only create fallback if no thumbnail exists
+                return self.create_fallback_thumbnail(filename, clean_name, force_regenerate, error_msg)
             else:
-                self.logger.error("Nano Banana API error %d: %s", response.status_code, response.text)
-                return self.create_fallback_thumbnail(filename, clean_name, force_regenerate)
-            
+                error_msg = f"Gemini API error (status {response.status_code})"
+                self.logger.error("%s: %s", error_msg, response.text[:200])
+                # Preserve existing thumbnail if available
+                if os.path.exists(thumbnail_path):
+                    self.logger.info("Preserving existing thumbnail for %s", filename)
+                    return (thumbnail_path, error_msg)
+                return self.create_fallback_thumbnail(filename, clean_name, force_regenerate, error_msg)
+
         except Exception as e:
-            self.logger.error("Error generating image with Nano Banana: %s", e)
-            return self.create_fallback_thumbnail(filename, clean_name)
+            error_msg = f"Error generating thumbnail: {str(e)}"
+            self.logger.error("%s", error_msg)
+            # Preserve existing thumbnail if available
+            if os.path.exists(thumbnail_path):
+                self.logger.info("Preserving existing thumbnail for %s", filename)
+                return (thumbnail_path, error_msg)
+            return self.create_fallback_thumbnail(filename, clean_name, force_regenerate, error_msg)
     
-    def create_fallback_thumbnail(self, filename, clean_name, force_regenerate=False):
-        """Create a colorful thumbnail as fallback"""
+    def create_fallback_thumbnail(self, filename, clean_name, force_regenerate=False, error_msg=None):
+        """Create a colorful thumbnail as fallback
+
+        Returns:
+            tuple: (thumbnail_path, error_message) where error_message indicates why fallback was used
+        """
         thumbnail_path = os.path.join(THUMBNAIL_FOLDER, f"{os.path.splitext(filename)[0]}.png")
-        
+
         # Skip if thumbnail already exists and not forcing regeneration
         if os.path.exists(thumbnail_path) and not force_regenerate:
             self.logger.info("Thumbnail already exists for %s", filename)
-            return thumbnail_path
+            return (thumbnail_path, error_msg)
         
         # Create colorful image based on filename
         try:
@@ -196,21 +227,26 @@ class ThumbnailGenerator:
             
             # Save thumbnail
             img.save(thumbnail_path, 'PNG')
+            fallback_msg = error_msg or "Using generated fallback thumbnail"
             self.logger.info("Created fallback thumbnail: %s", thumbnail_path)
-            return thumbnail_path
-            
+            return (thumbnail_path, fallback_msg)
+
         except Exception as e:
             self.logger.error("Error creating fallback thumbnail: %s", e)
-            return None
+            return (None, f"Failed to create fallback thumbnail: {str(e)}")
     
     def generate_thumbnail_for_sound(self, filename, force_regenerate=False):
-        """Generate a complete thumbnail for a single sound file"""
+        """Generate a complete thumbnail for a single sound file
+
+        Returns:
+            tuple: (thumbnail_path, error_message) where error_message is None on success
+        """
         try:
-            thumbnail_path = self.generate_image_with_nano_banana(filename, force_regenerate)
-            return thumbnail_path
+            result = self.generate_image_with_nano_banana(filename, force_regenerate)
+            return result
         except Exception as e:
             self.logger.error("Error generating thumbnail for %s: %s", filename, e)
-            return None
+            return (None, f"Error generating thumbnail: {str(e)}")
     
     def generate_all_thumbnails(self):
         """Generate thumbnails for all meme sounds"""

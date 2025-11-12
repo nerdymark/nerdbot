@@ -1,5 +1,7 @@
 # NerdBot
 
+![NerdBot](https://nerdymark.com/static/blog-images/nerdbot-20250918.gif)
+
 A multi-project robotics system built on Raspberry Pi 5 with Hailo AI acceleration, featuring zero-latency Steam Controller integration, computer vision, and autonomous capabilities.
 
 ## 🎮 Steam Controller Integration
